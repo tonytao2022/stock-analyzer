@@ -1267,7 +1267,7 @@ async function loadScores(){
       signal_type:s.signal_type||'HOLD',signal_label:s.signal_label||'停',
       raw_score:parseFloat(s.raw_score||0),v_score:parseFloat(s.v_score||0),
     }));
-    scores.sort((a,b)=>b.composite_score-a.composite_score);
+    scores.sort((a,b)=>b.composite_score-a.composite_score || (parseFloat(b.raw_score||0)-parseFloat(a.raw_score||0)));
     S.scores=scores;
     $$('scoreSummary').textContent='共 '+scores.length+' 只 (监控池)';
     renderScoreTable();
