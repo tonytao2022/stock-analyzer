@@ -67,10 +67,34 @@ def score_cycle_enhanced(
 
     base = max(0, min(100, base + sector_boost))
 
-    # 策略判定: 优化5 — reversion 严格只在秋冬/熊市/恐慌启用
+    # 策略判定: 从 season_state 表读取 scoring_strategy
+    # fallback: 夏/春/混沌→momentum，秋/冬/恐慌→reversion
     strategy = 'momentum'
-    if season in ('autumn', 'winter', 'panic') or regime == 'bear' or market_score < -3:
-        strategy = 'reversion'
+    try:
+        import pymysql
+        _pwd = ''
+        with open('/etc/mysql/debian.cnf') as _f:
+            for _l in _f:
+                if 'password' in _l:
+                    _pwd = _l.split('=')[-1].strip().strip('"').strip("'")
+                    break
+        _conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+            password=_pwd,database='stock_db',charset='utf8mb4')
+        _cu = _conn.cursor()
+        _cu.execute("""
+            SELECT scoring_strategy FROM season_state 
+            WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1
+        """)
+        _r = _cu.fetchone()
+        if _r and _r[0]:
+            strategy = _r[0]
+        _cu.close(); _conn.close()
+    except:
+        # fallback硬编码
+        if season in ('autumn', 'winter', 'panic') or regime == 'bear' or market_score < -3:
+            strategy = 'reversion'
+        else:
+            strategy = 'momentum'
 
     return CycleResult(
         score=round(base, 1),

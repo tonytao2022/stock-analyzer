@@ -679,7 +679,7 @@ def refresh_realtime():
             tk = os.environ.get('TUSHARE_TOKEN', '')
             if tk: return tk
             _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-                password=_mysql_pass())
+                password=_get_mysql_pass())
             _cu2 = _c2.cursor()
             _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
             _r2 = _cu2.fetchone()
@@ -1273,7 +1273,7 @@ def portfolio_holdings():
             if not _token:
                 import pymysql
                 _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-                    password=_mysql_pass(),database='openclaw_config',charset='utf8mb4')
+                    password=_get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
                 _cu2 = _c2.cursor()
                 _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
                 _r2 = _cu2.fetchone()
@@ -1434,7 +1434,7 @@ def portfolio_recalc():
                 _token = _ts._token_  # 已初始化的token
                 if not _token:
                     _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-                        password=_mysql_pass(),database='openclaw_config',charset='utf8mb4')
+                        password=_get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
                     _cu2 = _c2.cursor()
                     _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
                     _r2 = _cu2.fetchone()
@@ -1980,7 +1980,112 @@ def email_send_alert():
         return api_error(str(e))
 
 
+# ─── POST /api/v1/management/portfolio/lock ────────────────
+@app.route('/api/v1/management/portfolio/lock', methods=['POST'])
+def portfolio_lock():
+    """手动加锁"""
+    try:
+        data = request.get_json(force=True) or {}
+        ts_code = data.get('ts_code', '')
+        days = int(data.get('days', 21))
+        user_id = data.get('user_id', 'tony')
+        if not ts_code: return api_error('参数不足')
+        with db_cursor() as cur:
+            cur.execute("""
+                SELECT ts_code, name, trade_date FROM portfolio_holdings 
+                WHERE user_id=%s AND ts_code=%s AND status='HOLDING'
+                ORDER BY trade_date DESC LIMIT 1
+            """, (user_id, ts_code))
+            row = cur.fetchone()
+            if not row: return api_error('未找到持仓')
+            # 计算锁仓截止日（days个交易日≈days*1.5自然日）
+            from datetime import timedelta
+            lock_until = (datetime.now() + timedelta(days=int(days*1.5))).strftime('%Y-%m-%d')
+            cur.execute("""
+                UPDATE portfolio_holdings SET lock_until=%s, lock_active=1, updated_at=NOW()
+                WHERE user_id=%s AND ts_code=%s AND status='HOLDING'
+                ORDER BY trade_date DESC LIMIT 1
+            """, (lock_until, user_id, ts_code))
+            logger.info(f"portfolio_lock: {ts_code} lock_until={lock_until}")
+        return api_success({'ts_code': ts_code, 'lock_until': lock_until})
+    except Exception as e:
+        logger.error(f"portfolio_lock error: {e}")
+        return api_error(str(e))
+
+# ─── POST /api/v1/management/portfolio/unlock ──────────────
+@app.route('/api/v1/management/portfolio/unlock', methods=['POST'])
+def portfolio_unlock():
+    """手动解锁"""
+    try:
+        data = request.get_json(force=True) or {}
+        ts_code = data.get('ts_code', '')
+        reason = data.get('reason', '')
+        user_id = data.get('user_id', 'tony')
+        if not ts_code or not reason: return api_error('参数不足（解锁需填写原因）')
+        with db_cursor() as cur:
+            cur.execute("""
+                UPDATE portfolio_holdings SET lock_until=NULL, lock_active=0, updated_at=NOW()
+                WHERE user_id=%s AND ts_code=%s AND status='HOLDING'
+                ORDER BY trade_date DESC LIMIT 1
+            """, (user_id, ts_code))
+            logger.info(f"portfolio_unlock: {ts_code} reason={reason}")
+        return api_success({'ts_code': ts_code, 'unlocked': True})
+    except Exception as e:
+        logger.error(f"portfolio_unlock error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/portfolio/locked ───────────────
+@app.route('/api/v1/management/portfolio/locked', methods=['GET'])
+def portfolio_locked_list():
+    """锁仓列表"""
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("""
+                SELECT ts_code, name, trade_date, qty, cost_price, current_price,
+                       market_value, profit_amount, profit_pct, lock_until
+                FROM portfolio_holdings 
+                WHERE user_id='tony' AND status='HOLDING' AND lock_until IS NOT NULL
+                ORDER BY lock_until ASC
+            """)
+            rows = cur.fetchall()
+            locked = []
+            from datetime import date
+            for r in rows:
+                lu = r['lock_until']
+                if lu:
+                    remain = (lu - date.today()).days
+                    if remain < 0: remain = 0
+                else:
+                    remain = 0
+                locked.append({
+                    'ts_code': r['ts_code'],
+                    'name': r['name'],
+                    'qty': int(r['qty'] or 0),
+                    'trade_date': str(r['trade_date']),
+                    'lock_until': str(lu) if lu else None,
+                    'lock_remaining_days': remain,
+                    'current_price': float(r['current_price'] or 0),
+                    'cost_price': float(r['cost_price'] or 0),
+                    'market_value': float(r['market_value'] or 0),
+                    'profit_amount': float(r['profit_amount'] or 0),
+                    'profit_pct': float(r['profit_pct'] or 0),
+                })
+        return api_success({'locked': locked, 'total': len(locked)})
+    except Exception as e:
+        logger.error(f"portfolio_locked_list error: {e}")
+        return api_error(str(e))
+
 # ─── 启动 ───────────────────────────────────────────────────
 if __name__ == '__main__':
     logger.info("Starting management API server on port 8887...")
     app.run(host='0.0.0.0', port=8887, debug=False)
+
+# ═══ 数据库密码获取 ═══
+def _get_mysql_pass():
+    try:
+        with open('/etc/mysql/debian.cnf') as _f:
+            for _l in _f:
+                if 'password' in _l:
+                    return _l.strip().split('=')[-1].strip().strip('"').strip("'")
+    except: pass
+    return 'root'
