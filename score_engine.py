@@ -641,15 +641,16 @@ class ScoreEngineV4:
                         cur2.execute("""
                             INSERT INTO trend_score
                                 (ts_code, trade_date, cycle_score, structure_score, emotion_score,
-                                 composite_score, confidence_mult, raw_score, is_calculable)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)
+                                 composite_score, confidence_mult, raw_score, is_calculable, close_price)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1,%s)
                             ON DUPLICATE KEY UPDATE
                                 cycle_score=VALUES(cycle_score),
                                 structure_score=VALUES(structure_score),
                                 emotion_score=VALUES(emotion_score),
                                 composite_score=VALUES(composite_score),
                                 confidence_mult=VALUES(confidence_mult),
-                                raw_score=VALUES(raw_score)
+                                raw_score=VALUES(raw_score),
+                                close_price=VALUES(close_price)
                         """, (
                             r['ts_code'], trade_date,
                             round(r['cycle_score'],2),
@@ -658,6 +659,7 @@ class ScoreEngineV4:
                             round(r['v_score'],2),
                             round(r.get('confidence',1.0),2),
                             round(r['raw_score'],2),
+                            round(r.get('close',0),3),
                         ))
                         saved_ts+=1
 
