@@ -14,6 +14,34 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db_config import db_cursor, api_success, api_error, api_not_found, serialize_rows, DATA_ERROR_MARKER
 
 app = Flask(__name__)
+
+# ═══ API 认证 ═══
+_API_KEY_CACHE = {"key": None}
+def _get_api_key():
+    if _API_KEY_CACHE["key"]:
+        return _API_KEY_CACHE["key"]
+    try:
+        with db_cursor(commit=False) as _ck_cur:
+            _ck_cur.execute("SELECT config_value FROM system_config WHERE config_key=%(k)s LIMIT 1", {"k": "api_key"})
+            _ck_r = _ck_cur.fetchone()
+            if _ck_r:
+                _API_KEY_CACHE["key"] = _ck_r["config_value"] if isinstance(_ck_r, dict) else _ck_r[0]
+                return _ck_r["config_value"] if isinstance(_ck_r, dict) else _ck_r[0]
+    except: pass
+    return None
+
+@app.before_request
+def _check_api_key():
+    if request.method == "OPTIONS":
+        return None
+    if request.path in ("/health",):
+        return None
+    req_key = request.headers.get("X-API-Key", "") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not req_key:
+        return {"code": -1, "error": "缺少认证信息 (X-API-Key)", "data": None}, 401
+    expected = _get_api_key()
+    if not expected or req_key != expected:
+        return {"code": -1, "error": "认证失败", "data": None}, 401
 logger = logging.getLogger('signal_8889')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 

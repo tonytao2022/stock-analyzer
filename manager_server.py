@@ -18,6 +18,50 @@ app = Flask(__name__)
 logger = logging.getLogger('manager_8887')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+# ═══ API 认证 ═══
+_DEFAULT_USER = "tony"  # 默认用户ID，可通过system_config配置
+def _get_user_id():
+    try:
+        with db_cursor(commit=False) as _u_cur:
+            _u_cur.execute("SELECT config_value FROM system_config WHERE config_key=\\\"default_user_id\\\" LIMIT 1")
+            _u_r = _u_cur.fetchone()
+            if _u_r:
+                v = _u_r["config_value"] if isinstance(_u_r, dict) else _u_r[0]
+                if v: return v
+    except: pass
+    return _DEFAULT_USER
+_API_KEY_CACHE = {'key': None}
+def _get_api_key():
+    if _API_KEY_CACHE['key']:
+        return _API_KEY_CACHE['key']
+    try:
+        with db_cursor(commit=False) as _ck_cur:
+            _ck_cur.execute("SELECT config_value FROM system_config WHERE config_key='api_key' LIMIT 1")
+            _ck_r = _ck_cur.fetchone()
+            if _ck_r:
+                key = _ck_r['config_value'] if isinstance(_ck_r, dict) else _ck_r[0]
+                _API_KEY_CACHE['key'] = key
+                return key
+    except: pass
+    return None
+
+@app.before_request
+def _check_api_key():
+    # 健康检查和OPTIONS预检请求不验证
+    if request.method == 'OPTIONS':
+        return None
+    if request.path in ('/health', '/api/v1/management/system/health'):
+        return None
+    # 从请求头获取API Key
+    req_key = request.headers.get('X-API-Key', '')
+    if not req_key:
+        req_key = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not req_key:
+        return api_error('缺少认证信息 (X-API-Key)', code=401)
+    expected = _get_api_key()
+    if not expected or req_key != expected:
+        return api_error('认证失败', code=401)
+
 
 # ─── 健康检查 ───────────────────────────────────────────────
 @app.route('/health', methods=['GET'])
@@ -706,7 +750,7 @@ def refresh_realtime():
         _conn = _pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
             password=_pwd, database='stock_db', charset='utf8mb4')
         cur = _conn.cursor(_pymysql.cursors.DictCursor)
-        cur.execute("SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='tony'")
+        cur.execute("SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id=''+_get_user_id()+''")
         watch_codes = [r['ts_code'] for r in cur.fetchall()]
         cur.execute("SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'")
         bt_codes = [r['ts_code'] for r in cur.fetchall()]
@@ -1266,7 +1310,8 @@ def portfolio_holdings():
             h['hold_days'] = hold_days
             h['over_20d'] = 1 if hold_days >= 20 else 0
 
-        # 批量获取实时价（rt_k接口批量取出所有持仓）
+        # 原子化价格更新：尝试实时价 → 回退收盘价（两个路径互斥，不混合）
+        _price_updated = False
         try:
             import tushare as _ts, os
             _token = os.environ.get('TUSHARE_TOKEN', '')
@@ -1289,31 +1334,33 @@ def portfolio_holdings():
                         _price_map = dict(zip(_rt_all['ts_code'], _rt_all['close'].astype(float)))
                         for h in holdings:
                             if h['ts_code'] in _price_map:
-                                h['current_price'] = _price_map[h['ts_code']]
+                                np = _price_map[h['ts_code']]
+                                if np and np > 0:
+                                    h['current_price'] = np
+                                    _calc = lambda q,c,np: (round(q*np,2), round((np-c)*q,2), round(((np-c)/c*100) if c>0 else 0,2))
+                                    h['market_value'], h['profit_amount'], h['profit_pct'] = _calc(float(h.get('qty',0)), float(h.get('cost_price',0)), np)
+                                    _price_updated = True
         except Exception as _e:
-            logger.warning(f"rt_k批量获取失败: {_e}")
+            logger.warning(f"实时价获取失败: {_e}")
 
-        # rt_k失败后，回退到daily_kline最新收盘价
-        try:
-            with db_cursor(commit=False) as _dk_cur:
-                _codes = [h['ts_code'] for h in holdings]
-                for _h in holdings:
-                    _dk_cur.execute(
-                        "SELECT `close` FROM daily_kline WHERE ts_code=%s ORDER BY trade_date DESC LIMIT 1",
-                        (_h['ts_code'],)
-                    )
-                    _dk_row = _dk_cur.fetchone()
-                    if _dk_row:
-                        _close = float(_dk_row['close'])
-                        if _close > 0:
-                            _h['current_price'] = _close
-                            _q = float(_h.get('qty',0))
-                            _c = float(_h.get('cost_price',0))
-                            _h['market_value'] = round(_q * _close, 2)
-                            _h['profit_amount'] = round((_close - _c) * _q, 2)
-                            _h['profit_pct'] = round(((_close - _c) / _c * 100) if _c > 0 else 0, 2)
-        except Exception as _dk_e:
-            logger.warning(f"daily_kline回退查询失败: {_dk_e}")
+        # rt_k未更新时，用daily_kline收盘价统一更新（不混合两种价格）
+        if not _price_updated:
+            try:
+                with db_cursor(commit=False) as _dk_cur:
+                    for _h in holdings:
+                        _dk_cur.execute(
+                            "SELECT `close` FROM daily_kline WHERE ts_code=%s ORDER BY trade_date DESC LIMIT 1",
+                            (_h['ts_code'],)
+                        )
+                        _dk_row = _dk_cur.fetchone()
+                        if _dk_row:
+                            _close = float(_dk_row['close'])
+                            if _close > 0:
+                                _h['current_price'] = _close
+                                _calc = lambda q,c,np: (round(q*np,2), round((np-c)*q,2), round(((np-c)/c*100) if c>0 else 0,2))
+                                _h['market_value'], _h['profit_amount'], _h['profit_pct'] = _calc(float(_h.get('qty',0)), float(_h.get('cost_price',0)), _close)
+            except Exception as _dk_e:
+                logger.warning(f"收盘价回退失败: {_dk_e}")
 
         total_mv = sum(float(h['market_value'] or 0) for h in holdings)
         total_pa = sum(float(h['profit_amount'] or 0) for h in holdings)
@@ -1472,7 +1519,7 @@ def portfolio_recalc():
             except:
                 pass
             with cur2 as cur3:
-                cur3.execute("SELECT cost_price, qty FROM portfolio_holdings WHERE user_id='tony' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",(ts_code,))
+                cur3.execute("SELECT cost_price, qty FROM portfolio_holdings WHERE user_id=''+_get_user_id()+'' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",(ts_code,))
                 hr=cur3.fetchone()
                 cost=float(hr['cost_price']) if hr and hr['cost_price'] else 1
                 qty=int(hr['qty']) if hr and hr['qty'] else 0
@@ -1481,7 +1528,7 @@ def portfolio_recalc():
                 cur3.execute("""
                     UPDATE portfolio_holdings SET current_price=%s, profit_amount=%s, profit_pct=%s,
                     advice=%s, advice_reason=%s, updated_at=NOW()
-                    WHERE user_id='tony' AND ts_code=%s AND status='HOLDING'
+                    WHERE user_id=''+_get_user_id()+'' AND ts_code=%s AND status='HOLDING'
                     ORDER BY trade_date DESC LIMIT 1
                 """, (cp, profit_amt, profit_pct, advice, reason, ts_code))
 
@@ -1562,7 +1609,7 @@ def portfolio_recalc_all():
                     cost=float(h['cost_price'] or 1); qty=int(h['qty'] or 0)
                     profit_amt=round((cp-cost)*qty,2)
                     profit_pct=round((cp-cost)/cost*100,2) if cost>0 else 0
-                    c.execute("UPDATE portfolio_holdings SET current_price=%s,profit_amount=%s,profit_pct=%s,advice=%s,advice_reason=%s,updated_at=NOW() WHERE user_id='tony' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                    c.execute("UPDATE portfolio_holdings SET current_price=%s,profit_amount=%s,profit_pct=%s,advice=%s,advice_reason=%s,updated_at=NOW() WHERE user_id=''+_get_user_id()+'' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
                               (cp,profit_amt,profit_pct,advice,reason,code))
                     updated+=1
             except Exception as _re:
@@ -1603,7 +1650,7 @@ def watch_pool_refresh():
             br=cur.fetchone(); breadth=br['up']/br['t'] if br and br['t'] else 0.5
             trade_date = str(ld) if ld else str(date.today())
 
-            cur.execute("SELECT wp.ts_code, wp.name, sb.industry FROM watch_pool wp LEFT JOIN stock_basic sb ON wp.ts_code=sb.ts_code WHERE wp.is_active=1 AND wp.user_id='tony'")
+            cur.execute("SELECT wp.ts_code, wp.name, sb.industry FROM watch_pool wp LEFT JOIN stock_basic sb ON wp.ts_code=sb.ts_code WHERE wp.is_active=1 AND wp.user_id=''+_get_user_id()+''")
             stocks = cur.fetchall()
 
         total = len(stocks)
@@ -1751,14 +1798,14 @@ def watch_pool_add():
     ts_code = data.get('ts_code', '')
     if not ts_code: return api_error('缺少ts_code')
     with db_cursor() as cur:
-        cur.execute("INSERT INTO watch_pool (user_id, ts_code, name) VALUES ('tony', %s, %s) ON DUPLICATE KEY UPDATE is_active=1", (ts_code, data.get('name', '')))
+        cur.execute("INSERT INTO watch_pool (user_id, ts_code, name) VALUES (''+_get_user_id()+'', %s, %s) ON DUPLICATE KEY UPDATE is_active=1", (ts_code, data.get('name', '')))
     return api_success({'ts_code': ts_code})
 
 @app.route('/api/v1/management/watch-pool/remove', methods=['POST'])
 def watch_pool_remove():
     data = request.get_json()
     with db_cursor() as cur:
-        cur.execute("UPDATE watch_pool SET is_active=0 WHERE user_id='tony' AND ts_code=%s", (data.get('ts_code', '')))
+        cur.execute("UPDATE watch_pool SET is_active=0 WHERE user_id=''+_get_user_id()+'' AND ts_code=%s", (data.get('ts_code', '')))
     return api_success({})
 
 @app.route('/api/v1/management/portfolio/watch-list', methods=['GET'])
@@ -1770,7 +1817,7 @@ def portfolio_watch_list():
             FROM watch_pool wp
             LEFT JOIN daily_kline dk ON wp.ts_code = dk.ts_code
                 AND dk.trade_date = (SELECT MAX(trade_date) FROM daily_kline)
-            WHERE wp.user_id='tony' AND wp.is_active=1
+            WHERE wp.user_id=''+_get_user_id()+'' AND wp.is_active=1
             ORDER BY wp.sort_order
         """)
         return api_success({'list': serialize_rows(cur.fetchall())})
@@ -2076,7 +2123,7 @@ def portfolio_locked_list():
                 SELECT ts_code, name, trade_date, qty, cost_price, current_price,
                        market_value, profit_amount, profit_pct, lock_until
                 FROM portfolio_holdings 
-                WHERE user_id='tony' AND status='HOLDING' AND lock_until IS NOT NULL
+                WHERE user_id=''+_get_user_id()+'' AND status='HOLDING' AND lock_until IS NOT NULL
                 ORDER BY lock_until ASC
             """)
             rows = cur.fetchall()
