@@ -42,12 +42,12 @@ def calc_stop_loss(
     # 基准: -1.5×ATR
     stop = -atr_pct * 1.5
 
-    # momentum策略: 紧止损(市场好时容忍度低)
+    # momentum策略: 宽止损（追涨容忍回调）
     if strategy == 'momentum':
-        stop = -atr_pct * 1.2
-    # reversion策略: 宽止损(等反弹需要时间)
+        stop = -atr_pct * 2.0
+    # reversion策略: 紧止损（抄底空间有限，及时离场）
     elif strategy == 'reversion':
-        stop = -atr_pct * 2.5
+        stop = -atr_pct * 1.2
 
     # 仓位越高止损越紧
     if position_pct > 60:

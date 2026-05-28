@@ -43,96 +43,12 @@ def score_chanlun_enhanced(
 
     close = closes[-1]
 
-    # ── 趋势(40%) ──
-    ma5 = sma(closes, 5)
-    ma10 = sma(closes, 10)
-    ma20 = sma(closes, 20)
-    ma60 = sma(closes, 60)
-    ma120 = sma(closes, 120)
-
-    tr = 0.0
-    if ma5 > ma10: tr += 8
-    if ma5 > ma20: tr += 7
-    if ma10 > ma20: tr += 10
-    if ma20 > ma60: tr += 10
-    if ma20 > ma120: tr += 5
-    if close > ma5: tr += 5
-    if close > ma20: tr += 5
-    old_ma20 = sma(closes[:-20], 20) if n > 80 else ma20
-    slope20 = (ma20 - old_ma20) / old_ma20 if old_ma20 > 0 else 0
-    tr += max(0, min(25, (slope20 + 0.05) * 250))
-    yh = max(closes[-250:]) if n >= 250 else max(closes)
-    yl = min(closes[-250:]) if n >= 250 else min(closes)
-    if yh > yl:
-        tr += (close - yl) / (yh - yl) * 25
-    trend_score = round(max(0, min(100, tr)), 1)
-
-    # ── 动量(35%) ──
-    r5 = roc(closes, 5)
-    r10 = roc(closes, 10)
-    r20 = roc(closes, 20)
-    r14 = rsi(closes, 14)
-    mo = 0.0
-    mo += max(0, min(25, 12.5 + r5 * 50))
-    mo += max(0, min(20, 10 + r10 * 30))
-    mo += max(0, min(15, 7.5 + r20 * 20))
-    mo += max(0, min(20, r14 * 0.2))
-    acc = r5 - r20
-    if acc > 0.02: mo += 10
-    elif acc > 0: mo += 5
-    if n >= 6:
-        up_vol = sum(1 for i in range(-5, 0) if closes[i] > closes[i - 1] and vols[i] > vols[i - 1])
-        mo += up_vol * 2
-    momentum_score = round(max(0, min(100, mo)), 1)
-
-    # ── 波动(15%, 反转版) ──
-    vol20 = stddev(closes, 20)
-    vol60 = stddev(closes, 60)
-    daily_vol = vol20 / close if close > 0 else 0.02
-    vl = 50.0
-    if daily_vol < 0.005: vl += 5
-    elif daily_vol < 0.01: vl += 15
-    elif daily_vol < 0.02: vl += 10
-    elif daily_vol >= 0.03 and daily_vol < 0.04: vl -= 10
-    elif daily_vol >= 0.04: vl -= 20
-    if vol60 > 0:
-        vr = vol20 / vol60
-        if vr < 0.7: vl += 10
-        elif vr < 0.85: vl += 5
-        elif vr > 1.5: vl -= 10
-        elif vr > 1.2: vl -= 5
-    if n >= 10:
-        max_diff = (max(closes[-10:]) - min(closes[-10:])) / close
-        if max_diff < 0.03: vl += 10
-        elif max_diff < 0.06: vl += 5
-        elif max_diff > 0.15: vl -= 10
-    if n >= 20:
-        h20 = max(closes[-20:])
-        mdd = (h20 - close) / h20
-        if mdd > 0.15: vl += 8
-        elif mdd > 0.10: vl += 4
-        elif mdd < 0.02: vl += 2
-    volatility_score = round(max(0, min(100, vl)), 1)
-
-    # ── 量能(10%) ──
-    v20m = sma(vols, 20)
-    v60m = sma(vols, 60)
-    vr_day = vols[-1] / v20m if v20m > 0 else 1
-    vo = 50.0
-    if v60m > 0:
-        vt = v20m / v60m
-        if vt > 1.3: vo -= 8
-        elif vt > 1.1: vo -= 3
-        elif vt < 0.7: vo += 5
-        elif vt < 0.9: vo += 3
-    if vr_day > 2.0: vo -= 10
-    elif vr_day > 1.5: vo -= 5
-    elif 0.7 <= vr_day <= 1.3: vo += 3
-    elif vr_day < 0.5: vo += 5
-    if n >= 6:
-        dn_vol = sum(1 for i in range(-5, 0) if closes[i] < closes[i - 1] and vols[i] > vols[i - 1])
-        vo -= dn_vol * 3
-    volume_score = round(max(0, min(100, vo)), 1)
+    # ── 简化fallback: 不重复计算四因子，只做缠论微调 ──
+    # 四因子由score_cycle_enhanced和主引擎计算，此处不重复
+    trend_score = 50.0
+    momentum_score = 50.0
+    volatility_score = 50.0
+    volume_score = 50.0
 
     # ── 缠论代理: 多周期背离检测 ──
     chanlun_signal = 0.0  # -100~+100: 负=超跌反弹窗口, 正=趋势延续
