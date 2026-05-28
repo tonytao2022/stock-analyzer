@@ -396,8 +396,15 @@ class ScoreEngineV4:
     def _load_kline(self, ts_code, lookback=400):
         self._connect()
         cur=self.conn.cursor(pymysql.cursors.DictCursor)
+        # 优先用复权K线，不足120日或最新日期不够新则回退到原始K线
         cur.execute("SELECT trade_date,high,low,close,vol,change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(ts_code,))
-        rows=cur.fetchall(); cur.close()
+        rows=cur.fetchall()
+        if len(rows) < 120 or (rows and str(rows[-1]['trade_date']) < '2026-05-27'):
+            cur.execute("SELECT trade_date,high,low,close,vol,change_pct FROM daily_kline WHERE ts_code=%s ORDER BY trade_date ASC",(ts_code,))
+            rows2=cur.fetchall()
+            if len(rows2) >= 120:
+                rows = rows2
+        cur.close()
         return rows[-lookback:] if len(rows)>lookback else rows
 
     def _get_industry(self, ts_code):
