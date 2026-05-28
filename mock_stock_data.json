@@ -1,0 +1,20 @@
+{
+  "basic_info": {
+    "name": "宁德时代",
+    "industry": "电气设备",
+    "market_cap": 8000.0,
+    "pe_ratio": 25.5
+  },
+  "price_data": {
+    "current_price": 180.5,
+    "change_percent": 2.3,
+    "volume": 15000000,
+    "turnover": 2700000000
+  },
+  "financials": {
+    "roe": 18.5,
+    "revenue_growth": 25.3,
+    "gross_margin": 28.7,
+    "debt_ratio": 45.2
+  }
+}

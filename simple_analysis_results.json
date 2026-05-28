@@ -1,0 +1,23 @@
+[
+  {
+    "stock_code": "300750",
+    "stock_name": "宁德时代",
+    "total_score": 75,
+    "recommendation": "✅ 买入",
+    "action": "BUY"
+  },
+  {
+    "stock_code": "300274",
+    "stock_name": "阳光电源",
+    "total_score": 71,
+    "recommendation": "🔄 持有",
+    "action": "HOLD"
+  },
+  {
+    "stock_code": "300476",
+    "stock_name": "胜宏科技",
+    "total_score": 47,
+    "recommendation": "❌ 卖出",
+    "action": "SELL"
+  }
+]
