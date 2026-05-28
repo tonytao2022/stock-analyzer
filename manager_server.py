@@ -1615,6 +1615,7 @@ def watch_pool_refresh():
             try:
                 cur2=db_cursor()
                 with cur2 as c:
+                    # 从复权K线读取用于评分计算
                     c.execute("SELECT trade_date, high, low, close, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(code,))
                     rows = c.fetchall()
                     if len(rows) < 200:
@@ -1623,6 +1624,15 @@ def watch_pool_refresh():
                     closes=[float(r['close']) for r in rows]; vols=[float(r.get('vol',0)or 0) for r in rows]
                     chgs=[float(r.get('change_pct')or 0) for r in rows]; n=len(closes)
                     all_win=[{'close':closes[j],'high':float(rows[j]['high']),'low':float(rows[j]['low']),'vol':vols[j]} for j in range(n)]
+                    
+                    # 现价用 daily_kline（真实收盘价，非复权）
+                    _real_close = float(rows[-1]['close'])  # fallback
+                    try:
+                        c.execute("SELECT `close`, change_pct FROM daily_kline WHERE ts_code=%s AND trade_date=%s", (code, trade_date))
+                        _r = c.fetchone()
+                        if _r:
+                            _real_close = float(_r['close'])
+                    except: pass
 
                     bw=get_block_weights(industry)
                     chanlun=score_chanlun_enhanced(all_win,mkt_sea,industry)
@@ -1661,7 +1671,7 @@ def watch_pool_refresh():
                             raw_score=VALUES(raw_score), v_score=VALUES(v_score),
                             signal_type=VALUES(signal_type), signal_label=VALUES(signal_label),
                             position_pct=VALUES(position_pct), trend_score=VALUES(trend_score)
-                    """, (code, name, trade_date, closes[-1], chgs[-1], round(raw,1), v,
+                    """, (code, name, trade_date, _real_close, chgs[-1], round(raw,1), v,
                           chanlun["trend"], chanlun["momentum"], chanlun["volatility"], chanlun["volume"],
                           signal, sig_label, round(pos,1), 0, cycle.strategy,
                           mkt_sea, regime, rets.get(5,0), rets.get(10,0), rets.get(20,0)))
