@@ -1293,6 +1293,28 @@ def portfolio_holdings():
         except Exception as _e:
             logger.warning(f"rt_k批量获取失败: {_e}")
 
+        # rt_k失败后，回退到daily_kline最新收盘价
+        try:
+            with db_cursor(commit=False) as _dk_cur:
+                _codes = [h['ts_code'] for h in holdings]
+                for _h in holdings:
+                    _dk_cur.execute(
+                        "SELECT `close` FROM daily_kline WHERE ts_code=%s ORDER BY trade_date DESC LIMIT 1",
+                        (_h['ts_code'],)
+                    )
+                    _dk_row = _dk_cur.fetchone()
+                    if _dk_row:
+                        _close = float(_dk_row['close'])
+                        if _close > 0:
+                            _h['current_price'] = _close
+                            _q = float(_h.get('qty',0))
+                            _c = float(_h.get('cost_price',0))
+                            _h['market_value'] = round(_q * _close, 2)
+                            _h['profit_amount'] = round((_close - _c) * _q, 2)
+                            _h['profit_pct'] = round(((_close - _c) / _c * 100) if _c > 0 else 0, 2)
+        except Exception as _dk_e:
+            logger.warning(f"daily_kline回退查询失败: {_dk_e}")
+
         total_mv = sum(float(h['market_value'] or 0) for h in holdings)
         total_pa = sum(float(h['profit_amount'] or 0) for h in holdings)
 
