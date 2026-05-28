@@ -215,32 +215,31 @@ def score_chanlun_enhanced(rows, season, industry, ts_code=None):
         mo+=up_vol*2
     momentum_score=round(max(0,min(100,mo)),1)
 
-    # ── 波动(15%, 反转版) ──
+    # ── 波动(15%, 反转版) — 连续函数+滚动标准化 ──
     vol20=stddev(closes,20); vol60=stddev(closes,60)
     daily_vol=vol20/close if close>0 else 0.02
-    vl=50
-    if daily_vol<0.005: vl+=5
-    elif daily_vol<0.01: vl+=15
-    elif daily_vol<0.02: vl+=10
-    elif daily_vol>=0.03 and daily_vol<0.04: vl-=10
-    elif daily_vol>=0.04: vl-=20
+    # 波动率Z-score（相对自身60日历史的位置）
+    vol_zscore = 0
+    if vol60>0 and n>=60:
+        vol_mean = sum(stddev(closes[i-20:i],20)/close for i in range(-60,0) if len(closes[i-20:i])==20) / 60
+        vol_std = (sum((stddev(closes[i-20:i],20)/close - vol_mean)**2 for i in range(-60,0) if len(closes[i-20:i])==20) / 60)**0.5
+        if vol_std > 0:
+            vol_zscore = (daily_vol - vol_mean) / vol_std
+    # 连续映射: 低波动=高分(低波异象), 高波动=低分
+    vl = 50 - vol_zscore * 8  # 每1个标准差±8分
+    vl = max(10, min(90, vl))
+    # 滚动相对位置修正
     if vol60>0:
         vr=vol20/vol60
-        if vr<0.7: vl+=10
-        elif vr<0.85: vl+=5
-        elif vr>1.5: vl-=10
-        elif vr>1.2: vl-=5
-    if n>=10:
-        max_diff=(max(closes[-10:])-min(closes[-10:]))/close
-        if max_diff<0.03: vl+=10
-        elif max_diff<0.06: vl+=5
-        elif max_diff>0.15: vl-=10
+        if vr<0.7: vl+=8
+        elif vr<0.85: vl+=4
+        elif vr>1.5: vl-=8
+        elif vr>1.2: vl-=4
     if n>=20:
         h20=max(closes[-20:]); mdd=(h20-close)/h20
-        if mdd>0.15: vl+=8
-        elif mdd>0.10: vl+=4
-        elif mdd<0.02: vl+=2
-    volatility_score=round(max(0,min(100,vl)),1)
+        if mdd>0.15: vl+=6
+        elif mdd>0.10: vl+=3
+    volatility_score=round(max(10,min(90,vl)),1)
 
     # ── 量能(10%) ──
     v20m=sma(vols,20); v60m=sma(vols,60)

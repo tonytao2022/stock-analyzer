@@ -32,9 +32,59 @@ BLOCK_WEIGHTS: Dict[str, Dict[str, float]] = {
     '水力发电': {'trend': 0.30, 'momentum': 0.25, 'volatility': 0.20, 'volume': 0.25},
     '火力发电': {'trend': 0.30, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.20},
     '小金属':   {'trend': 0.25, 'momentum': 0.30, 'volatility': 0.25, 'volume': 0.20},
+
+
+    '银行':     {'trend': 0.20, 'momentum': 0.20, 'volatility': 0.25, 'volume': 0.35},
+    '证券':     {'trend': 0.35, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.15},
+    '保险':     {'trend': 0.20, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.30},
+    '多元金融': {'trend': 0.30, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.20},
+    # 资源能源类: 均值回归
+    '煤炭开采': {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    '石油开采': {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    '石油加工': {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    '铝':       {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    '铜':       {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    '铅锌':     {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    '黄金':     {'trend': 0.20, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.30},
+    # 军工类: 趋势强、波动大
+    '航空':     {'trend': 0.40, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.10},
+    '船舶':     {'trend': 0.40, 'momentum': 0.30, 'volatility': 0.15, 'volume': 0.15},
+    # 基建地产类: 趋势弱、波动大
+    '建筑工程': {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.30, 'volume': 0.20},
+    '全国地产': {'trend': 0.20, 'momentum': 0.25, 'volatility': 0.30, 'volume': 0.25},
+    '区域地产': {'trend': 0.20, 'momentum': 0.25, 'volatility': 0.30, 'volume': 0.25},
+    '水泥':     {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.25, 'volume': 0.25},
+    # 交通物流类: 量能辅助大
+    '港口':     {'trend': 0.25, 'momentum': 0.25, 'volatility': 0.20, 'volume': 0.30},
+    '水运':     {'trend': 0.30, 'momentum': 0.25, 'volatility': 0.20, 'volume': 0.25},
+    '仓储物流': {'trend': 0.30, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.20},
+    '路桥':     {'trend': 0.20, 'momentum': 0.20, 'volatility': 0.25, 'volume': 0.35},
+    # 汽车产业链
+    '汽车整车': {'trend': 0.35, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.15},
+    '汽车配件': {'trend': 0.30, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.20},
+    # 消费制造
+    '纺织':     {'trend': 0.25, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.25},
+    '服饰':     {'trend': 0.25, 'momentum': 0.35, 'volatility': 0.20, 'volume': 0.20},
+    '造纸':     {'trend': 0.25, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.25},
+    '食品':     {'trend': 0.30, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.20},
+    # 医药
+    '生物制药': {'trend': 0.30, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.20},
+    '医疗保健': {'trend': 0.25, 'momentum': 0.35, 'volatility': 0.20, 'volume': 0.20},
+    # 农业
+    '农业综合': {'trend': 0.25, 'momentum': 0.30, 'volatility': 0.25, 'volume': 0.20},
+    '饲料':     {'trend': 0.25, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.25},
+    '农药化肥': {'trend': 0.25, 'momentum': 0.30, 'volatility': 0.25, 'volume': 0.20},
+    # 公用事业
+    '环境保护': {'trend': 0.30, 'momentum': 0.25, 'volatility': 0.20, 'volume': 0.25},
+    '水务':     {'trend': 0.25, 'momentum': 0.20, 'volatility': 0.25, 'volume': 0.30},
+    '供气供热': {'trend': 0.25, 'momentum': 0.20, 'volatility': 0.25, 'volume': 0.30},
+    '新型电力': {'trend': 0.30, 'momentum': 0.25, 'volatility': 0.20, 'volume': 0.25},
+    # 科技类补充
+    '互联网':   {'trend': 0.35, 'momentum': 0.40, 'volatility': 0.10, 'volume': 0.15},
+    '广告包装': {'trend': 0.30, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.20},
+    '影视音像': {'trend': 0.30, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.20},
 }
 
-_DEFAULT_WEIGHTS: Dict[str, float] = {'trend': 0.35, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.15}
 
 
 def get_block_weights(industry: str) -> Dict[str, float]:
