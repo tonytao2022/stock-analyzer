@@ -399,7 +399,17 @@ class ScoreEngineV4:
         # 优先用复权K线，不足120日或最新日期不够新则回退到原始K线
         cur.execute("SELECT trade_date,high,low,close,vol,change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(ts_code,))
         rows=cur.fetchall()
-        if len(rows) < 120 or (rows and str(rows[-1]['trade_date']) < '2026-05-27'):
+        # 动态获取最新交易日日期
+        _latest_td = str(date.today())
+        try:
+            _c2 = self.conn.cursor()
+            _c2.execute("SELECT MAX(trade_date) as d FROM daily_kline")
+            _r2 = _c2.fetchone()
+            if _r2 and _r2[0]:
+                _latest_td = str(_r2[0])
+            _c2.close()
+        except: pass
+        if len(rows) < 120 or (rows and str(rows[-1]['trade_date']) < _latest_td):
             cur.execute("SELECT trade_date,high,low,close,vol,change_pct FROM daily_kline WHERE ts_code=%s ORDER BY trade_date ASC",(ts_code,))
             rows2=cur.fetchall()
             if len(rows2) >= 120:
@@ -726,17 +736,38 @@ class ScoreEngineV4:
                         breadth = mkt.get('breadth_ratio', 0.5)
                         # ═══ 市场状态参数查表 ═══
                         # 根据季节/市场状态获取动态参数
-                        season_params = {
-                            'summer':        {'buy_th':45,'max_pos':70,'stop':-5.0,'min_hold':10,'strategy':'momentum'},
-                            'spring':        {'buy_th':45,'max_pos':70,'stop':-5.0,'min_hold':10,'strategy':'momentum'},
-                            'chaos_spring':  {'buy_th':40,'max_pos':50,'stop':-5.0,'min_hold':10,'strategy':'momentum'},
-                            'chaos':         {'buy_th':48,'max_pos':5,'stop':-3.0,'min_hold':0,'strategy':'空仓'},
-                            'chaos_autumn':  {'buy_th':42,'max_pos':30,'stop':-7.0,'min_hold':15,'strategy':'reversion'},
-                            'autumn':        {'buy_th':38,'max_pos':20,'stop':-10.0,'min_hold':20,'strategy':'reversion'},
-                            'winter':        {'buy_th':35,'max_pos':10,'stop':-10.0,'min_hold':20,'strategy':'reversion'},
-                            'panic':         {'buy_th':0,'max_pos':0,'stop':-15.0,'min_hold':0,'strategy':'空仓'},
+                        # 从 system_config 表动态读取季节参数
+                        _sc = {}
+                        try:
+                            _cur3 = self.conn.cursor()
+                            _cur3.execute("SELECT config_key, config_value FROM system_config")
+                            for _r3 in _cur3.fetchall():
+                                _sc[_r3[0]] = _r3[1]
+                            _cur3.close()
+                        except: pass
+                        _season_map = {
+                            'summer':       ('summer',       'momentum'),
+                            'spring':       ('spring',       'momentum'),
+                            'chaos_spring': ('chaos_spring', 'momentum'),
+                            'chaos':        ('chaos',        '空仓'),
+                            'chaos_autumn': ('chaos_autumn', 'reversion'),
+                            'autumn':       ('autumn',       'reversion'),
+                            'winter':       ('winter',       'reversion'),
+                            'panic':        ('panic',        '空仓'),
                         }
-                        sp = season_params.get(season, season_params['chaos'])
+                        _sp = _season_map.get(season, _season_map['chaos'])
+                        _prefix = 'season_' + _sp[0] + '_'
+                        _buy = _sc.get(_prefix + 'buy_threshold', 40)
+                        _maxpos = _sc.get(_prefix + 'max_pos', 10)
+                        _stop = _sc.get(_prefix + 'stop_loss', -5)
+                        _hold = _sc.get(_prefix + 'min_hold', 0)
+                        sp = {
+                            'buy_th': int(_buy),
+                            'max_pos': int(_maxpos),
+                            'stop': float(_stop),
+                            'min_hold': int(_hold),
+                            'strategy': _sp[1],
+                        }
 
                         # 安全闸门判定
                         gate_triggered = 0
