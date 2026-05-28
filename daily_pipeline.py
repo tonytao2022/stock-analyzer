@@ -17,6 +17,7 @@
   python3 daily_pipeline.py --step score  # 只跑评分
 """
 import os, sys, time, logging, argparse
+from db_config import db_cursor, get_connection
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -4,6 +4,7 @@
 包含: 原始评分分层 / V型映射 / 子因子贡献度分析
 """
 import os, sys, pymysql, math, json
+from db_config import db_cursor, get_connection
 from datetime import datetime, date
 from collections import defaultdict
 

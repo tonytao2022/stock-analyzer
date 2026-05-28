@@ -4,6 +4,7 @@
 基于评分引擎 v2.0 前复权数据, 模拟买入/卖出操作
 """
 import pymysql, sys, math, os
+from db_config import db_cursor, get_connection
 from collections import defaultdict
 
 def get_pass():

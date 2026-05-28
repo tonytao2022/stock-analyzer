@@ -6,6 +6,7 @@
 批量跑评分 → 写入 trend_score + strategy_signal
 """
 import os, sys, time, math, pymysql
+from db_config import db_cursor, get_connection
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

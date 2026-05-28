@@ -23,6 +23,7 @@
 """
 
 import os, sys, math, json, pymysql
+from db_config import db_cursor, get_connection
 from datetime import datetime, date, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple

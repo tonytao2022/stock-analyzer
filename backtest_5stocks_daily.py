@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """5只股票逐日评分回测 — 2026-05-10 至 2026-05-25"""
 import pymysql, sys
+from db_config import db_cursor, get_connection
 sys.path.insert(0, '.')
 from score_engine import score_trend, score_momentum, score_volatility, score_volume, vmap
 

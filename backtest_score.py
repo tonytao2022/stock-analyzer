@@ -12,6 +12,7 @@
 输出: 每日每只股票0-100综合评分 → 对比N日后实际收益 → 统计IC/分层收益
 """
 import os, sys, pymysql, math, time
+from db_config import db_cursor, get_connection
 from datetime import datetime, date, timedelta
 from collections import defaultdict, OrderedDict
 

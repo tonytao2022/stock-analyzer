@@ -11,6 +11,7 @@
 - 混沌(chaos): 均线缠绕
 """
 import os, sys
+from db_config import db_cursor, get_connection
 import pymysql
 from datetime import datetime, date, timedelta
 from collections import defaultdict

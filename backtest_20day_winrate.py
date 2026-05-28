@@ -5,6 +5,7 @@
 回测56只回测池股票的评分信号，统计不同持有周期的胜率和收益
 """
 import os, sys, pymysql, math
+from db_config import db_cursor, get_connection
 from datetime import datetime, date
 from collections import defaultdict
 

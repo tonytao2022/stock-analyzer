@@ -11,6 +11,7 @@
 最终回答：实际交易中到底持多少天胜率最高？
 """
 import os, sys, time, pymysql, json
+from db_config import db_cursor, get_connection
 from datetime import datetime
 from collections import defaultdict
 

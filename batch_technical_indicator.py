@@ -6,6 +6,7 @@
 计算 MACD/RSI/布林带/MA/ATR/KDJ → 写入 technical_indicator 表
 """
 import os, sys, time, math, pymysql
+from db_config import db_cursor, get_connection
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -10,6 +10,7 @@
   5. 给出操作建议(结合评分引擎信号)
 """
 import pytesseract, re, json, sys, os
+from db_config import db_cursor, get_connection
 from PIL import Image
 from datetime import date, datetime
 from collections import defaultdict

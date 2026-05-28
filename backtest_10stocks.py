@@ -3,6 +3,7 @@
 10只股票精细回测 — 逐因子、逐日验证评分对未来收益的预测力
 """
 import os, sys, pymysql, math, json
+from db_config import db_cursor, get_connection
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 

@@ -5,6 +5,7 @@
 从 Tushare moneyflow 拉取最新资金流向数据 → money_flow 表
 """
 import os, sys, time, pymysql, tushare as ts
+from db_config import db_cursor, get_connection
 from datetime import datetime, date, timedelta
 
 def get_pass():

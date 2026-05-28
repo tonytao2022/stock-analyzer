@@ -4,6 +4,7 @@
 用法: python fetch_backtest_kline.py [--days 365]
 """
 import os, sys, time, argparse
+from db_config import db_cursor, get_connection
 import pymysql
 import tushare as ts
 from datetime import datetime, date, timedelta

@@ -7,6 +7,7 @@
   2. 10日复查时 CAUTIOUS_BUY 也续持, 但止损缩到 ATR×0.8
 """
 import pymysql, sys
+from db_config import db_cursor, get_connection
 from collections import defaultdict
 
 def get_pass():

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """随机20只股票 v4.0 多周期回测"""
 import pymysql, sys, os, json, math, random
+from db_config import db_cursor, get_connection
 from collections import defaultdict, namedtuple
 
 def get_pass():

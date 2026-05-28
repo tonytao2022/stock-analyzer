@@ -17,6 +17,7 @@ v2.1 升级:
 """
 
 import os
+from db_config import db_cursor, get_connection
 import sys
 import math
 import json

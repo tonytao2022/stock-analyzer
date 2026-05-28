@@ -11,6 +11,7 @@
   4. 最有效的因子组合是什么?
 """
 import os, sys, time, pymysql, json
+from db_config import db_cursor, get_connection
 from datetime import datetime
 from collections import defaultdict
 

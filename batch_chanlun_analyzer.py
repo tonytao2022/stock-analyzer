@@ -6,6 +6,7 @@
 跑完整缠论分析(分型→笔→中枢→背驰→买卖点)并写入 chanlun_structure 表
 """
 import os, sys, time, json, math
+from db_config import db_cursor, get_connection
 import pymysql
 from datetime import datetime
 
