@@ -1,0 +1,1986 @@
+"""
+manager_server.py - 管理API服务 (Port 8887)
+路由前缀: /api/v1/management/*
+Antony架构方案第4.2节规范
+"""
+import os
+import sys
+import json
+import logging
+from datetime import datetime, date, timedelta
+from flask import Flask, request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from db_config import db_cursor, api_success, api_error, api_not_found, serialize_rows, DATA_ERROR_MARKER
+
+app = Flask(__name__)
+logger = logging.getLogger('manager_8887')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+
+# ─── 健康检查 ───────────────────────────────────────────────
+@app.route('/health', methods=['GET'])
+@app.route('/api/v1/management/system/health', methods=['GET'])
+def health():
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT 1")
+            db_ok = cur.fetchone() is not None
+        return api_success({
+            'service': 'management_api',
+            'port': 8887,
+            'database': 'connected' if db_ok else 'disconnected',
+            'version': '2.0.0'
+        })
+    except Exception as e:
+        return api_error(str(e), http_status=500)
+
+
+# ─── GET /api/v1/management/portfolio ───────────────────────
+@app.route('/api/v1/management/portfolio', methods=['GET'])
+def portfolio():
+    """获取投资组合监控列表"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        direction = request.args.get('direction')
+        min_score = request.args.get('min_score')
+        page = int(request.args.get('page', 1))
+        page_size = min(int(request.args.get('page_size', 20)), 100)
+        offset = (page - 1) * page_size
+
+        wheres = ["ss.trade_date = %s"]
+        params = [trade_date]
+        if direction:
+            wheres.append("ss.direction = %s")
+            params.append(direction)
+        if min_score:
+            wheres.append("ss.composite_score >= %s")
+            params.append(float(min_score))
+
+        with db_cursor(commit=False) as cur:
+            # 总数
+            cur.execute(
+                f"SELECT COUNT(*) as cnt FROM strategy_signal ss WHERE {' AND '.join(wheres)}",
+                params
+            )
+            total = cur.fetchone()['cnt']
+
+            # 分页数据
+            cur.execute(
+                f"""SELECT ss.*, sb.name, sb.industry, sb.market
+                    FROM strategy_signal ss
+                    LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
+                    WHERE {' AND '.join(wheres)}
+                    ORDER BY ss.composite_score DESC
+                    LIMIT %s OFFSET %s""",
+                params + [page_size, offset]
+            )
+            rows = cur.fetchall()
+
+        return api_success({
+            'trade_date': trade_date,
+            'stocks': serialize_rows(rows),
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': (total + page_size - 1) // page_size
+            }
+        })
+    except Exception as e:
+        logger.error(f"portfolio error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/portfolio/{ts_code} ─────────────
+@app.route('/api/v1/management/portfolio/<ts_code>', methods=['GET'])
+def portfolio_detail(ts_code):
+    """获取单只股票组合详情"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                """SELECT ss.*, sb.name, sb.industry, sb.market
+                   FROM strategy_signal ss
+                   LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
+                   WHERE ss.ts_code=%s AND ss.trade_date=%s
+                   LIMIT 1""",
+                [ts_code, trade_date]
+            )
+            row = cur.fetchone()
+
+        if not row:
+            return api_not_found()
+        return api_success(serialize_rows([row])[0])
+    except Exception as e:
+        logger.error(f"portfolio_detail error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/portfolio/{ts_code}/history ─────
+@app.route('/api/v1/management/portfolio/<ts_code>/history', methods=['GET'])
+def portfolio_history(ts_code):
+    """获取持仓历史评分曲线"""
+    try:
+        start = request.args.get('start', (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'))
+        end = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                """SELECT trade_date, composite_score, cycle_score, structure_score, emotion_score
+                   FROM trend_score
+                   WHERE ts_code=%s AND trade_date BETWEEN %s AND %s
+                   ORDER BY trade_date ASC""",
+                [ts_code, start, end]
+            )
+            rows = cur.fetchall()
+
+        return api_success({
+            'ts_code': ts_code,
+            'start': start,
+            'end': end,
+            'count': len(rows),
+            'points': serialize_rows(rows)
+        })
+    except Exception as e:
+        logger.error(f"portfolio_history error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/dashboard ───────────────────────
+@app.route('/api/v1/management/dashboard', methods=['GET'])
+def dashboard():
+    """数据驾驶舱概览"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+
+        with db_cursor(commit=False) as cur:
+            # 如果请求的日期没有 strategy_signal 数据,自动 fallback 到最新有数据的日期
+            cur.execute("SELECT COUNT(*) AS cnt FROM strategy_signal WHERE trade_date=%s", [trade_date])
+            has_data = cur.fetchone()['cnt'] > 0
+            if not has_data:
+                cur.execute("SELECT MAX(trade_date) AS latest FROM strategy_signal")
+                latest_row = cur.fetchone()
+                if latest_row and latest_row['latest']:
+                    trade_date = latest_row['latest'].isoformat()
+
+            # 市场快照
+            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [trade_date])
+            snapshot = cur.fetchone()
+
+            # Top5 买入
+            cur.execute(
+                """SELECT ss.*, sb.name
+                   FROM strategy_signal ss LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
+                   WHERE ss.trade_date=%s AND ss.direction='LONG'
+                     AND ss.is_calculable=1 AND ss.gate_triggered=0
+                   ORDER BY ss.composite_score DESC LIMIT 5""",
+                [trade_date]
+            )
+            top_buys = cur.fetchall()
+
+            # 告警数
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM strategy_signal WHERE trade_date=%s AND autumn_tiger=1",
+                [trade_date]
+            )
+            tiger_count = cur.fetchone()['cnt']
+
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM signal_change_log WHERE trade_date=%s AND is_alert=1",
+                [trade_date]
+            )
+            alert_count = cur.fetchone()['cnt']
+
+            # v3.0 四季数据
+            cur.execute(
+                "SELECT season, raw_score, confidence, position_advice FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1"
+            )
+            season_row = cur.fetchone()
+            season_data = {}
+            if season_row:
+                se = season_row['season']
+                season_data = {
+                    'season': se,
+                    'season_label': se,
+                    'season_emoji': {'spring':'🌺','summer':'☀️','autumn':'🍂','winter':'❄️','chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','chaos_mild':'🌤️','chaos_cold':'🌥️','panic':'💀','recovery':'🌱'}.get(se,'❓'),
+                    'raw_score': float(season_row['raw_score'] or 0),
+                    'confidence': float(season_row['confidence'] or 0),
+                    'position_label': season_row.get('position_advice', ''),
+                }
+
+        return api_success({
+            'trade_date': trade_date,
+            'market_state': serialize_rows([snapshot])[0] if snapshot else None,
+            'top5_buys': serialize_rows(top_buys),
+            'risk_alerts': {
+                'autumn_tiger_count': tiger_count,
+                'direction_change_alerts': alert_count,
+            },
+            **season_data,
+        })
+    except Exception as e:
+        logger.error(f"dashboard error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/dashboard/market-overview ───────
+@app.route('/api/v1/management/dashboard/market-overview', methods=['GET'])
+def market_overview():
+    """市场全局概览"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [trade_date])
+            snapshot = cur.fetchone()
+
+        if not snapshot:
+            return api_success({'trade_date': trade_date, 'ready': False, 'message': '该日期快照尚未生成'})
+
+        return api_success({
+            'trade_date': trade_date,
+            'cycle_stage': snapshot.get('cycle_stage'),
+            'hengjiyuan_score': snapshot.get('hengjiyuan_score'),
+            'hengjiyuan_level': snapshot.get('hengjiyuan_level'),
+            'confidence_mult': snapshot.get('confidence_mult'),
+            'signal_distribution': {
+                'buy_count': snapshot.get('buy_signal_cnt', 0),
+                'sell_count': snapshot.get('sell_signal_cnt', 0),
+                'wait_count': snapshot.get('wait_signal_cnt', 0),
+                'high_confidence_buy': snapshot.get('high_conf_buy', 0),
+                'autumn_tiger_count': snapshot.get('autumn_tiger_cnt', 0),
+            },
+            'total_analyzed': snapshot.get('total_analyzed', 0),
+            'safety_gate': snapshot.get('safety_gate', '未判定'),
+            'gate_triggered': bool(snapshot.get('gate_triggered', 0)),
+        })
+    except Exception as e:
+        logger.error(f"market_overview error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/dashboard/top-buys ──────────────
+@app.route('/api/v1/management/dashboard/top-buys', methods=['GET'])
+def top_buys():
+    """Top买入推荐"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        limit = min(int(request.args.get('limit', 10)), 30)
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                """SELECT ss.*, sb.name, sb.industry
+                   FROM strategy_signal ss LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
+                   WHERE ss.trade_date=%s AND ss.direction='LONG'
+                     AND ss.is_calculable=1 AND ss.gate_triggered=0
+                   ORDER BY ss.composite_score DESC LIMIT %s""",
+                [trade_date, limit]
+            )
+            rows = cur.fetchall()
+
+        return api_success({
+            'trade_date': trade_date,
+            'count': len(rows),
+            'top_buys': serialize_rows(rows)
+        })
+    except Exception as e:
+        logger.error(f"top_buys error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/dashboard/risk-alerts ───────────
+@app.route('/api/v1/management/dashboard/risk-alerts', methods=['GET'])
+def risk_alerts():
+    """风险告警列表"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        limit = min(int(request.args.get('limit', 20)), 50)
+
+        alerts = []
+
+        with db_cursor(commit=False) as cur:
+            # 秋老虎
+            cur.execute(
+                """SELECT ss.*, sb.name FROM strategy_signal ss
+                   LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
+                   WHERE ss.trade_date=%s AND ss.autumn_tiger=1
+                   ORDER BY ss.tiger_confidence DESC LIMIT %s""",
+                [trade_date, limit]
+            )
+            for row in cur.fetchall():
+                alerts.append({
+                    'type': 'autumn_tiger',
+                    'ts_code': row['ts_code'],
+                    'name': row.get('name', ''),
+                    'confidence': row.get('tiger_confidence', 0),
+                    'description': f"秋老虎标记, 评分为{row.get('composite_score', 0)}"
+                })
+
+            # 方向变更
+            cur.execute(
+                """SELECT * FROM signal_change_log
+                   WHERE trade_date=%s AND is_alert=1
+                   ORDER BY id DESC LIMIT %s""",
+                [trade_date, limit]
+            )
+            for row in cur.fetchall():
+                alerts.append({
+                    'type': 'direction_change',
+                    'ts_code': row['ts_code'],
+                    'prev': row.get('prev_direction', ''),
+                    'new': row.get('new_direction', ''),
+                    'description': row.get('change_reason', '')
+                })
+
+        return api_success({
+            'trade_date': trade_date,
+            'count': len(alerts),
+            'alerts': alerts
+        })
+    except Exception as e:
+        logger.error(f"risk_alerts error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/history/scores ──────────────────
+@app.route('/api/v1/management/history/scores', methods=['GET'])
+def history_scores():
+    """历史评分查询(分页)"""
+    try:
+        ts_code = request.args.get('ts_code')
+        start = request.args.get('start', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+        end = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
+        page = int(request.args.get('page', 1))
+        page_size = min(int(request.args.get('page_size', 50)), 200)
+        offset = (page - 1) * page_size
+
+        wheres = ["trade_date BETWEEN %s AND %s"]
+        params = [start, end]
+        if ts_code:
+            wheres.append("ts_code = %s")
+            params.append(ts_code)
+
+        where_clause = " AND ".join(wheres)
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                f"SELECT COUNT(*) as cnt FROM trend_score WHERE {where_clause}",
+                params
+            )
+            total = cur.fetchone()['cnt']
+
+            cur.execute(
+                f"""SELECT ts.*, sb.name FROM trend_score ts
+                    LEFT JOIN stock_basic sb ON ts.ts_code = sb.ts_code
+                    WHERE {where_clause}
+                    ORDER BY ts.trade_date DESC, ts.composite_score DESC
+                    LIMIT %s OFFSET %s""",
+                params + [page_size, offset]
+            )
+            rows = cur.fetchall()
+
+        return api_success({
+            'points': serialize_rows(rows),
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': (total + page_size - 1) // page_size
+            }
+        })
+    except Exception as e:
+        logger.error(f"history_scores error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/history/signals ─────────────────
+@app.route('/api/v1/management/history/signals', methods=['GET'])
+def history_signals():
+    """历史信号查询(分页)"""
+    try:
+        ts_code = request.args.get('ts_code')
+        start = request.args.get('start', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+        end = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
+        page = int(request.args.get('page', 1))
+        page_size = min(int(request.args.get('page_size', 50)), 200)
+        offset = (page - 1) * page_size
+
+        wheres = ["trade_date BETWEEN %s AND %s"]
+        params = [start, end]
+        if ts_code:
+            wheres.append("ts_code = %s")
+            params.append(ts_code)
+
+        where_clause = " AND ".join(wheres)
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                f"SELECT COUNT(*) as cnt FROM strategy_signal WHERE {where_clause}",
+                params
+            )
+            total = cur.fetchone()['cnt']
+
+            cur.execute(
+                f"""SELECT ss.*, sb.name FROM strategy_signal ss
+                    LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
+                    WHERE {where_clause}
+                    ORDER BY ss.trade_date DESC, ss.composite_score DESC
+                    LIMIT %s OFFSET %s""",
+                params + [page_size, offset]
+            )
+            rows = cur.fetchall()
+
+        return api_success({
+            'signals': serialize_rows(rows),
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': (total + page_size - 1) // page_size
+            }
+        })
+    except Exception as e:
+        logger.error(f"history_signals error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/history/snapshots ───────────────
+@app.route('/api/v1/management/history/snapshots', methods=['GET'])
+def history_snapshots():
+    """每日快照列表"""
+    try:
+        limit = min(int(request.args.get('limit', 30)), 365)
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                "SELECT * FROM daily_snapshot ORDER BY trade_date DESC LIMIT %s",
+                [limit]
+            )
+            rows = cur.fetchall()
+
+        return api_success({'count': len(rows), 'snapshots': serialize_rows(rows)})
+    except Exception as e:
+        logger.error(f"history_snapshots error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/history/snapshot/{date} ─────────
+@app.route('/api/v1/management/history/snapshot/<snap_date>', methods=['GET'])
+def history_snapshot_detail(snap_date):
+    """指定日期的快照详情"""
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [snap_date])
+            row = cur.fetchone()
+        if not row:
+            return api_not_found()
+        return api_success(serialize_rows([row])[0])
+    except Exception as e:
+        logger.error(f"history_snapshot_detail error: {e}")
+        return api_error(str(e))
+
+
+# ─── 系统配置管理 ───────────────────────────────────────────
+@app.route('/api/v1/management/system/config', methods=['GET', 'PUT'])
+def system_config():
+    """获取/更新系统配置"""
+    try:
+        if request.method == 'GET':
+            with db_cursor(commit=False) as cur:
+                cur.execute("SELECT * FROM system_config ORDER BY config_key")
+                rows = cur.fetchall()
+            return api_success({'configs': serialize_rows(rows)})
+
+        # PUT
+        data = request.get_json(force=True)
+        key = data.get('config_key')
+        value = data.get('config_value')
+        config_type = data.get('config_type', 'string')
+
+        if not key:
+            return api_error("config_key必填", code=1001, http_status=400)
+
+        with db_cursor(commit=True) as cur:
+            cur.execute(
+                """INSERT INTO system_config (config_key, config_value, config_type)
+                   VALUES (%s, %s, %s)
+                   ON DUPLICATE KEY UPDATE config_value=VALUES(config_value), config_type=VALUES(config_type)""",
+                [key, str(value), config_type]
+            )
+
+        return api_success({'updated': key})
+    except Exception as e:
+        logger.error(f"system_config error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/system/pipeline-status ──────────
+@app.route('/api/v1/management/system/pipeline-status', methods=['GET'])
+def pipeline_status():
+    """数据管道状态"""
+    try:
+        limit = min(int(request.args.get('limit', 20)), 100)
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                "SELECT * FROM pipeline_exec_log ORDER BY id DESC LIMIT %s",
+                [limit]
+            )
+            rows = cur.fetchall()
+
+        return api_success({'count': len(rows), 'logs': serialize_rows(rows)})
+    except Exception as e:
+        logger.error(f"pipeline_status error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/system/pipeline/trigger ────────
+@app.route('/api/v1/management/system/pipeline/trigger', methods=['POST'])
+def pipeline_trigger():
+    """手动触发数据管道"""
+    try:
+        data = request.get_json(force=True) or {}
+        pipeline_name = data.get('pipeline_name', 'daily_update')
+        exec_date = data.get('exec_date', datetime.now().strftime('%Y-%m-%d'))
+
+        with db_cursor(commit=True) as cur:
+            cur.execute(
+                """INSERT INTO pipeline_exec_log
+                   (exec_date, pipeline_name, step_name, status, started_at)
+                   VALUES (%s, %s, %s, 'running', NOW())""",
+                [exec_date, pipeline_name, 'manual_trigger']
+            )
+            log_id = cur.lastrowid
+
+        logger.info(f"Pipeline triggered: {pipeline_name} for {exec_date}, log_id={log_id}")
+        return api_success({
+            'triggered': True,
+            'log_id': log_id,
+            'pipeline_name': pipeline_name,
+            'exec_date': exec_date
+        })
+    except Exception as e:
+        logger.error(f"pipeline_trigger error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/system/refresh-all ────────────
+@app.route('/api/v1/management/system/refresh-all', methods=['POST'])
+def refresh_all():
+    """一键实时刷新: 拉取行情→缠论→评分→监控池快照"""
+    import subprocess, sys, os
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        pipeline_script = os.path.join(script_dir, 'daily_pipeline.py')
+
+        # 用 subprocess 异步执行管道(跳过K线拉取,因为当前pandas兼容问题待修)
+        # 实际执行: chanlun + season + score + snapshot
+        log = []
+
+        # Step 1: 季节判定 (直接用 season_engine_v2.0)
+        import importlib.util as _ilu
+        try:
+            se_path = os.path.join(script_dir, 'season_engine_v2.0.py')
+            spec = _ilu.spec_from_file_location('season_engine', se_path)
+            mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if hasattr(mod, 'main'):
+                mod.main()
+            log.append('季节: ok')
+        except Exception as e:
+            log.append(f'季节: error-{e}')
+
+        # Step 2: 全量评分
+        try:
+            r = subprocess.run(
+                [sys.executable, pipeline_script, '--step', 'score'],
+                capture_output=True, text=True, timeout=60, cwd=script_dir
+            )
+            log.append(f'评分: {"ok" if r.returncode==0 else "fail"}')
+        except Exception as e:
+            log.append(f'评分: error-{e}')
+
+        # Step 3: 监控池快照
+        try:
+            import requests as _req
+            r2 = _req.post('http://localhost:8887/api/v1/management/watch-pool/refresh', timeout=120)
+            log.append(f'快照: {"ok" if r2.status_code==200 else "fail"}')
+        except Exception as e:
+            log.append(f'快照: error-{e}')
+
+        logger.info(f"一键刷新完成: {', '.join(log)}")
+        return api_success({'status': 'completed', 'steps': log})
+    except Exception as e:
+        logger.error(f"refresh_all error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/backtest-report ──────────────────
+@app.route('/api/v1/management/backtest-report', methods=['GET'])
+def backtest_report():
+    """多周期回测报告"""
+    import sys, os, subprocess, re as _re
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        script = os.path.join(script_dir, 'backtest_multi_cycle.py')
+        r = subprocess.run([sys.executable, script],
+            capture_output=True, text=True, timeout=120, cwd=script_dir)
+        output = r.stdout
+
+        # 解析输出中的回测数据
+        periods = []
+        for line in output.split('\n'):
+            if '▸ 持有' in line:
+                # ▸ 持有  5 日 | n=7711 | IC=+0.0202 | 多空利差=+0.41% | 全样本=+2.98%
+                m = _re.search(r'持有\s+(\d+)\s+日.*?n=(\d+).*?IC=([+-]?[\d.]+).*?多空利差=([+-]?[\d.]+)%.*?全样本=([+-]?[\d.]+)%', line)
+                if m:
+                    periods.append({
+                        'days': int(m.group(1)),
+                        'samples': int(m.group(2)),
+                        'ic': float(m.group(3)),
+                        'spread': float(m.group(4)),
+                        'avg_return': float(m.group(5)),
+                    })
+
+        return api_success({
+            'periods': periods,
+            'total_periods': len(periods),
+            'best_period': max(periods, key=lambda p: abs(p['spread']))['days'] if periods else 0,
+        })
+    except Exception as e:
+        logger.error(f"backtest_report error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/system/refresh-realtime ────────
+@app.route('/api/v1/management/system/refresh-realtime', methods=['POST'])
+def refresh_realtime():
+    """⏱️ 实时评分刷新: 用rt_k实时价跑评分，写入realtime_score表"""
+    import sys, os, time
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, script_dir)
+
+    log = []
+    try:
+        from score_engine import ScoreEngineV4, score_chanlun_enhanced
+        from engine.cycle_scorer import score_cycle_enhanced
+        from engine.indicators import rsi, sma
+        from engine.sentiment_scorer import score_sentiment
+        from engine.block_weights import get_block_weights, apply_block_weights
+        from engine.vmap import vmap_score, classify_signal
+        import pymysql, tushare as _ts
+
+        # 获取 Tushare token
+        def _get_token():
+            import os
+            tk = os.environ.get('TUSHARE_TOKEN', '')
+            if tk: return tk
+            _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+                password=_mysql_pass())
+            _cu2 = _c2.cursor()
+            _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+            _r2 = _cu2.fetchone()
+            _cu2.close(); _c2.close()
+            return _r2[0] if _r2 else ''
+
+        token = _get_token()
+        if not token:
+            return api_error('TUSHARE_TOKEN 未配置')
+
+        _ts.set_token(token)
+        pro = _ts.pro_api()
+
+        # 获取监控池股票列表
+        import pymysql as _pymysql
+        _pwd = ''
+        try:
+            with open('/etc/mysql/debian.cnf') as _pf:
+                for _pl in _pf:
+                    if 'password' in _pl:
+                        _pwd = _pl.split('=')[-1].strip().strip('"').strip("'")
+                        break
+        except: pass
+        _conn = _pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+            password=_pwd, database='stock_db', charset='utf8mb4')
+        cur = _conn.cursor(_pymysql.cursors.DictCursor)
+        cur.execute("SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='tony'")
+        watch_codes = [r['ts_code'] for r in cur.fetchall()]
+        cur.execute("SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'")
+        bt_codes = [r['ts_code'] for r in cur.fetchall()]
+        all_codes = list(dict.fromkeys(watch_codes + bt_codes))  # 去重
+
+        # 获取市场上下文
+        engine = ScoreEngineV4()
+        mkt = engine.get_market_context()
+
+        # 批量获取实时价（一次rt_k最多20只，分批次）
+        rt_prices = {}
+        rt_pre_close = {}
+        batch_size = 15
+        for i in range(0, len(all_codes), batch_size):
+            batch = all_codes[i:i+batch_size]
+            try:
+                df = pro.rt_k(ts_code=','.join(batch))
+                if df is not None and len(df) > 0:
+                    for _, row in df.iterrows():
+                        rt_prices[row['ts_code']] = float(row['close'])
+                        rt_pre_close[row['ts_code']] = float(row['pre_close'])
+            except:
+                pass
+            time.sleep(0.2)
+
+        now = datetime.now()
+        trade_date = now.strftime('%Y-%m-%d')
+
+        written = 0
+        errors = []
+
+        for code in all_codes:
+            if code not in rt_prices:
+                continue
+            rt_price = rt_prices[code]
+
+            try:
+                # 拿历史K线数据
+                cur.execute(
+                    "SELECT trade_date, high, low, close, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC LIMIT 400",
+                    (code,))
+                rows = cur.fetchall()
+                if len(rows) < 120:
+                    continue
+
+                closes = [float(r['close']) for r in rows]
+                highs = [float(r['high']) for r in rows]
+                lows = [float(r['low']) for r in rows]
+                vols = [float(r.get('vol',0) or 0) for r in rows]
+                chgs = [float(r.get('change_pct') or 0) for r in rows]
+
+                # 用实时价替换最新收盘价（涨跌幅用rt_k的pre_close计算，不复权）
+                pre_close = rt_pre_close.get(code, closes[-1])  # 优先用 rt_k 的昨收
+                hs_orig = highs[-1]
+                closes[-1] = rt_price
+                if rt_price > hs_orig:
+                    highs[-1] = rt_price
+                change_pct = round((rt_price - pre_close) / pre_close * 100, 3)
+
+                all_win = [{'close':closes[i],'high':highs[i],'low':lows[i],'vol':vols[i]} for i in range(len(closes))]
+                industry = engine._get_industry(code) or '未知'
+
+                bw = get_block_weights(industry)
+                chanlun = score_chanlun_enhanced(all_win, mkt['season'], industry, ts_code=code)
+                cycle = score_cycle_enhanced(mkt['season'], mkt['regime'], mkt['market_score'], industry, closes)
+                l2_raw = apply_block_weights(chanlun['trend'], chanlun['momentum'], chanlun['volatility'], chanlun['volume'], bw)
+                cl_total = round(max(0, min(100, l2_raw + chanlun['chanlun_signal'] * 0.15)), 1)
+
+                r14 = rsi(closes, 14)
+                v5m = sma(vols[-10:], 5) if len(vols) >= 10 else vols[-1]
+                v20m = sma(vols[-25:], 20) if len(vols) >= 25 else v5m
+                vol_reg = 'high' if v5m > v20m * 1.3 else ('low' if v5m < v20m * 0.7 else 'normal')
+                sent = score_sentiment(mkt['breadth_ratio'], vol_reg, r14, chgs[-1] if chgs else 0)
+
+                raw = cycle.score * 0.30 + cl_total * 0.40 + sent.score * 0.30
+                v = vmap_score(raw, 25)
+
+                sig_result = classify_signal(v, cycle.strategy, {'trend': chanlun['trend']})
+                signal = getattr(sig_result, 'signal', 'HOLD')
+                sig_label = getattr(sig_result, 'label', '⏸️持有')
+
+                # 从 backtest_pool 拿名称
+                name = ''
+                cur.execute("SELECT name FROM watch_pool WHERE ts_code=%s AND is_active=1", (code,))
+                rn = cur.fetchone()
+                name = rn['name'] if rn else ''
+                if not name:
+                    cur.execute("SELECT name FROM backtest_pool WHERE ts_code=%s", (code,))
+                    rn = cur.fetchone()
+                    name = rn['name'] if rn else code
+
+                cur.execute("""
+                    INSERT INTO realtime_score
+                        (ts_code, name, trade_date, query_time, rt_price, pre_close, change_pct,
+                         cycle_score, structure_score, emotion_score, composite_score,
+                         signal_type, signal_label, position_pct, season, regime)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                        query_time=VALUES(query_time), rt_price=VALUES(rt_price),
+                        change_pct=VALUES(change_pct), composite_score=VALUES(composite_score),
+                        signal_type=VALUES(signal_type), signal_label=VALUES(signal_label)
+                """, (
+                    code, name, trade_date, now,
+                    round(rt_price, 3), round(pre_close, 3), change_pct,
+                    round(cycle.score, 2), round(chanlun.get('total', 50), 2),
+                    round(sent.score, 2), round(v, 2),
+                    signal, sig_label, 50, mkt['season'], mkt['regime']
+                ))
+                written += 1
+            except Exception as e2:
+                errors.append(f'{code}:{e2}')
+
+            if written % 20 == 0:
+                _conn.commit()
+
+        _conn.commit()
+        cur.close(); _conn.close()
+        engine.close()
+
+        log.append(f'评分{written}只')
+        if errors:
+            log.append(f'错误{len(errors)}')
+            logger.warning(f"实时评分错误: {errors[:5]}")
+
+        logger.info(f"⏱️ 实时评分刷新完成: {', '.join(log)}")
+        return api_success({'status': 'completed', 'total': len(all_codes), 'written': written, 'errors': errors[:5]})
+    except Exception as e:
+        logger.error(f"refresh_realtime error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/realtime-scores ────────────────
+@app.route('/api/v1/management/realtime-scores', methods=['GET'])
+def realtime_scores():
+    """获取最新实时评分"""
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        with db_cursor(commit=False) as cur:
+            cur.execute("""
+                SELECT * FROM realtime_score
+                WHERE query_time = (SELECT MAX(query_time) FROM realtime_score)
+                ORDER BY composite_score DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+            # 获取最新查询时间
+            cur.execute("SELECT MAX(query_time) AS qt FROM realtime_score")
+            qt = cur.fetchone()
+
+        return api_success({
+            'list': serialize_rows(rows),
+            'query_time': str(qt['qt']) if qt else '',
+            'total': len(rows),
+        })
+    except Exception as e:
+        logger.error(f"realtime_scores error: {e}")
+        return api_error(str(e))
+
+
+# ─── 股票池管理 ─────────────────────────────────────────────
+@app.route('/api/v1/management/stock-pool', methods=['GET'])
+def stock_pool_list():
+    """获取股票池"""
+    try:
+        pool_name = request.args.get('pool')
+
+        with db_cursor(commit=False) as cur:
+            if pool_name:
+                cur.execute(
+                    """SELECT sp.*, sb.name, sb.industry
+                       FROM stock_pool sp LEFT JOIN stock_basic sb ON sp.ts_code = sb.ts_code
+                       WHERE sp.pool_name=%s AND sp.status='ACTIVE'
+                       ORDER BY sp.priority""",
+                    [pool_name]
+                )
+            else:
+                cur.execute(
+                    """SELECT sp.*, sb.name, sb.industry
+                       FROM stock_pool sp LEFT JOIN stock_basic sb ON sp.ts_code = sb.ts_code
+                       WHERE sp.status='ACTIVE' ORDER BY sp.pool_name, sp.priority"""
+                )
+            rows = cur.fetchall()
+
+        return api_success({'count': len(rows), 'stocks': serialize_rows(rows)})
+    except Exception as e:
+        logger.error(f"stock_pool_list error: {e}")
+        return api_error(str(e))
+
+
+@app.route('/api/v1/management/stock-pool', methods=['POST'])
+def stock_pool_manage():
+    """股票池增删"""
+    try:
+        data = request.get_json(force=True)
+        action = data.get('action')
+        ts_code = data.get('ts_code')
+        pool_name = data.get('pool_name')
+        reason = data.get('reason', '')
+
+        if not all([action, ts_code, pool_name]):
+            return api_error("action, ts_code, pool_name必填", code=1001, http_status=400)
+
+        with db_cursor(commit=True) as cur:
+            if action == 'add':
+                cur.execute(
+                    """INSERT INTO stock_pool (ts_code, pool_name, status, add_date, add_reason)
+                       VALUES (%s, %s, 'ACTIVE', CURDATE(), %s)
+                       ON DUPLICATE KEY UPDATE status='ACTIVE', add_reason=VALUES(add_reason),
+                           remove_date=NULL, remove_reason=NULL""",
+                    [ts_code, pool_name, reason]
+                )
+            elif action in ('remove', 'archive'):
+                new_status = 'INACTIVE' if action == 'remove' else 'ARCHIVED'
+                cur.execute(
+                    """UPDATE stock_pool SET status=%s, remove_date=CURDATE(), remove_reason=%s
+                       WHERE ts_code=%s AND pool_name=%s""",
+                    [new_status, reason, ts_code, pool_name]
+                )
+            else:
+                return api_error(f"未知操作: {action}", code=1000, http_status=400)
+
+        return api_success({'action': action, 'ts_code': ts_code, 'pool': pool_name})
+    except Exception as e:
+        logger.error(f"stock_pool_manage error: {e}")
+        return api_error(str(e))
+
+
+# ─── 回测股票池管理 (/api/v1/management/backtest-pool) ──────
+
+@app.route('/api/v1/management/backtest-pool', methods=['GET'])
+def backtest_pool_list():
+    """获取回测股票池列表(支持筛选+分页)"""
+    try:
+        status = request.args.get('status', 'ACTIVE')
+        industry = request.args.get('industry')
+        market = request.args.get('market')
+        keyword = request.args.get('keyword')
+        page = int(request.args.get('page', 1))
+        page_size = min(int(request.args.get('page_size', 50)), 200)
+        offset = (page - 1) * page_size
+
+        wheres = ["bp.status = %s"]
+        params = [status]
+        if industry:
+            wheres.append("bp.industry = %s")
+            params.append(industry)
+        if market:
+            wheres.append("bp.market = %s")
+            params.append(market)
+        if keyword:
+            wheres.append("(bp.name LIKE %s OR bp.ts_code LIKE %s)")
+            like_val = f"%{keyword}%"
+            params.extend([like_val, like_val])
+
+        where_clause = " AND ".join(wheres)
+
+        with db_cursor(commit=False) as cur:
+            cur.execute(f"SELECT COUNT(*) as cnt FROM backtest_pool bp WHERE {where_clause}", params)
+            total = cur.fetchone()['cnt']
+            cur.execute(
+                f"""SELECT bp.* FROM backtest_pool bp WHERE {where_clause}
+                    ORDER BY bp.market ASC, bp.industry ASC, bp.ts_code ASC
+                    LIMIT %s OFFSET %s""",
+                params + [page_size, offset]
+            )
+            rows = cur.fetchall()
+            cur.execute("SELECT DISTINCT industry FROM backtest_pool WHERE status='ACTIVE' ORDER BY industry")
+            industries = [r['industry'] for r in cur.fetchall()]
+
+        return api_success({
+            'stocks': serialize_rows(rows),
+            'filters': {
+                'industries': industries,
+                'markets': ['主板', '创业板', '科创板']
+            },
+            'pagination': {
+                'page': page, 'page_size': page_size,
+                'total': total,
+                'total_pages': max(1, (total + page_size - 1) // page_size)
+            }
+        })
+    except Exception as e:
+        logger.error(f"backtest_pool_list error: {e}")
+        return api_error(str(e))
+
+
+@app.route('/api/v1/management/backtest-pool', methods=['POST'])
+def backtest_pool_manage():
+    """回测股票池增/删/改"""
+    try:
+        data = request.get_json(force=True)
+        action = data.get('action')
+        if not action:
+            return api_error("action必填 (add/update/remove/archive/activate/batch_add)", code=1001, http_status=400)
+
+        with db_cursor(commit=True) as cur:
+            if action == 'add':
+                ts_code = data.get('ts_code')
+                name = data.get('name')
+                if not ts_code or not name:
+                    return api_error("ts_code和name必填", code=1001, http_status=400)
+                cur.execute(
+                    """INSERT INTO backtest_pool (ts_code, name, industry, market, status, notes)
+                       VALUES (%s, %s, %s, %s, 'ACTIVE', %s)
+                       ON DUPLICATE KEY UPDATE status='ACTIVE', name=VALUES(name),
+                       industry=VALUES(industry), market=VALUES(market), notes=VALUES(notes)""",
+                    [ts_code, name, data.get('industry', ''), data.get('market', ''), data.get('notes', '')]
+                )
+                msg = f"已添加/激活: {ts_code} {name}"
+
+            elif action == 'update':
+                ts_code = data['ts_code']
+                fields = {}
+                for f in ['name', 'industry', 'market', 'notes', 'status']:
+                    if f in data:
+                        fields[f] = data[f]
+                if not fields:
+                    return api_error("无更新字段", code=1001, http_status=400)
+                set_clause = ", ".join(f"{k}=%s" for k in fields)
+                vals = list(fields.values()) + [ts_code]
+                cur.execute(f"UPDATE backtest_pool SET {set_clause} WHERE ts_code=%s", vals)
+                msg = f"已更新: {ts_code}"
+
+            elif action == 'remove':
+                ts_code = data['ts_code']
+                cur.execute("DELETE FROM backtest_pool WHERE ts_code=%s", [ts_code])
+                cur.execute("DELETE FROM stock_pool WHERE ts_code=%s AND pool_name='backtest'", [ts_code])
+                msg = f"已删除: {ts_code}"
+
+            elif action == 'archive':
+                ts_code = data['ts_code']
+                cur.execute(
+                    "UPDATE backtest_pool SET status='ARCHIVED', notes=CONCAT(COALESCE(notes,''), '|已归档') WHERE ts_code=%s",
+                    [ts_code]
+                )
+                msg = f"已归档: {ts_code}"
+
+            elif action == 'activate':
+                ts_code = data['ts_code']
+                cur.execute("UPDATE backtest_pool SET status='ACTIVE' WHERE ts_code=%s", [ts_code])
+                msg = f"已激活: {ts_code}"
+
+            elif action == 'batch_add':
+                items = data.get('items', [])
+                if not items:
+                    return api_error("items数组必填", code=1001, http_status=400)
+                added = 0
+                for item in items:
+                    cur.execute(
+                        """INSERT INTO backtest_pool (ts_code, name, industry, market, status, notes)
+                           VALUES (%s, %s, %s, %s, 'ACTIVE', %s)
+                           ON DUPLICATE KEY UPDATE status='ACTIVE', name=VALUES(name),
+                           industry=VALUES(industry), market=VALUES(market), notes=VALUES(notes)""",
+                        [item['ts_code'], item['name'], item.get('industry', ''),
+                         item.get('market', ''), item.get('notes', '')]
+                    )
+                    added += 1
+                msg = f"批量添加完成: {added} 条"
+
+            else:
+                return api_error(f"未知操作: {action}", code=1000, http_status=400)
+
+        return api_success({'action': action, 'message': msg})
+    except Exception as e:
+        logger.error(f"backtest_pool_manage error: {e}")
+        return api_error(str(e))
+
+
+@app.route('/api/v1/management/backtest-pool/<ts_code>', methods=['GET'])
+def backtest_pool_detail(ts_code):
+    """获取单只回测池股票详情"""
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM backtest_pool WHERE ts_code=%s", [ts_code])
+            row = cur.fetchone()
+        if not row:
+            return api_not_found()
+        return api_success(serialize_rows([row])[0])
+    except Exception as e:
+        logger.error(f"backtest_pool_detail error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/signal-cards ────────────────────
+@app.route('/api/v1/management/signal-cards', methods=['GET'])
+def signal_cards():
+    """Phase 3: 信号卡片 - 基于v2.0评分+v3.0季节生成BUY/HOLD/SELL"""
+    try:
+        from score_engine import ScoreEngineV4
+        engine = ScoreEngineV4()
+        mkt = engine.get_market_context()
+        cards = []
+        emoji_map = {'spring':'🌸','summer':'☀️','autumn':'🍂','winter':'❄️','chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','panic':'💀','recovery':'🌱'}
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT ts_code, name FROM backtest_pool WHERE status='ACTIVE' AND market!='指数' ORDER BY ts_code")
+            stocks = cur.fetchall()
+
+        # 批量评分 (只取评分成功的)
+        raw_results = engine.score_pool()
+
+        for r in raw_results:
+            cards.append({
+                    'ts_code': r['ts_code'], 'name': r.get('name',''),
+                    'close': r['close'], 'change_pct': r['change_pct'],
+                    'raw_score': r['raw_score'], 'v_score': r['v_score'],
+                    'cycle_score': r['cycle_score'],
+                    'chanlun_score': r['chanlun_score'],
+                    'sentiment_score': r['sentiment_score'],
+                    'trend_score': r['trend_score'],
+                    'momentum_score': r['momentum_score'],
+                    'volatility_score': r['volatility_score'],
+                    'volume_score': r['volume_score'],
+                    'signal': r['signal'], 'signal_label': r['signal_label'],
+                    'position_pct': r['position_pct'],
+                    'strategy': r['strategy'],
+                    'stop_loss_pct': r.get('stop_loss_pct', -0.05),
+                    'industry': r.get('industry', ''),
+                    'chanlun_signal': r.get('chanlun_signal', 0),
+                    'risk_flags': r['risk_flags'],
+                    'season': r['season'], 'season_emoji': emoji_map.get(r['season'],'❓'),
+                })
+
+
+        engine.close()
+
+        # 按V分排序
+        cards.sort(key=lambda x: x['v_score'], reverse=True)
+
+        return api_success({
+            'season': mkt['season'], 'season_emoji': emoji_map.get(mkt['season'], '❓'),
+            'total': len(cards),
+            'buy_count': sum(1 for c in cards if c['signal'] in ('STRONG_BUY','BUY')),
+            'cautious_count': sum(1 for c in cards if c['signal'] == 'CAUTIOUS_BUY'),
+            'hold_count': sum(1 for c in cards if c['signal'] == 'HOLD'),
+            'sell_count': sum(1 for c in cards if c['signal'] == 'SELL'),
+            'cards': cards,
+        })
+    except Exception as e:
+        logger.error(f"signal_cards error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/backtest-multi-cycle ─────────────
+@app.route('/api/v1/management/backtest-multi-cycle', methods=['GET'])
+def backtest_multi_cycle():
+    """Phase 3: 多周期回测对比数据"""
+    try:
+        code = request.args.get('ts_code', '')
+        periods = [5,10,20,30,60]
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT close, trade_date FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC", [code])
+            rows = cur.fetchall()
+
+        if len(rows) < 121:
+            return api_error('数据不足')
+
+        closes = [float(r['close']) for r in rows]
+
+        result = {'ts_code': code, 'periods': []}
+        for p in periods:
+            rets = []
+            for i in range(120, len(rows)):
+                if i + p < len(rows) and closes[i] > 0:
+                    rets.append((closes[i+p] - closes[i]) / closes[i] * 100)
+            if rets:
+                avg = sum(rets)/len(rets)
+                pos = sum(1 for r in rets if r > 0)/len(rets)
+                result['periods'].append({
+                    'days': p, 'avg_return': round(avg, 2),
+                    'win_rate': round(pos*100, 1), 'samples': len(rets)
+                })
+
+        return api_success(result)
+    except Exception as e:
+        logger.error(f"backtest_multi_cycle error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/alerts ───────────────────────────
+@app.route('/api/v1/management/alerts', methods=['GET'])
+def alerts():
+    """Phase 3: 恐慌/复苏预警"""
+    try:
+        with db_cursor(commit=False) as cur:
+            # 最近四季状态
+            cur.execute("SELECT season, raw_score, trade_date FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 20")
+            rows = cur.fetchall()
+
+        alerts = []
+        if rows:
+            latest = rows[0]
+            # 恐慌检测: 连续5天评分<-3
+            last5 = rows[:5]
+            avg_score = sum(float(r['raw_score'] or 0) for r in last5) / len(last5)
+            if float(latest['raw_score'] or 0) < -3 and avg_score < -2:
+                alerts.append({'level':'panic','message':'💀 市场疑似进入恐慌状态,连续评分<-3,建议关注极端反转机会'})
+            elif float(latest['raw_score'] or 0) > 5:
+                alerts.append({'level':'info','message':'🔥 市场评分较高,注意追高风险'})
+            elif latest['season'] in ('winter','autumn'):
+                alerts.append({'level':'warning','message':'❄️ 市场处于防守期,建议降低仓位'})
+
+        return api_success({'alerts': alerts, 'total': len(alerts)})
+    except Exception as e:
+        logger.error(f"alerts error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/portfolio/holdings ─────────────
+@app.route('/api/v1/management/portfolio/holdings', methods=['GET'])
+def portfolio_holdings():
+    """查询当前持仓"""
+    try:
+        trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        with db_cursor(commit=False) as cur:
+            cur.execute("""
+                SELECT ph.*, ss.season as market_season
+                FROM portfolio_holdings ph
+                LEFT JOIN (SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1) ss ON 1=1
+                WHERE ph.status='HOLDING' AND ph.trade_date = (
+                    SELECT MAX(trade_date) FROM portfolio_holdings WHERE ts_code=ph.ts_code AND status='HOLDING'
+                )
+                ORDER BY ph.market_value DESC
+            """)
+            rows = cur.fetchall()
+
+            # 账户总资产
+            cur.execute("SELECT * FROM portfolio_account ORDER BY trade_date DESC LIMIT 1")
+            account = cur.fetchone()
+
+        holdings = serialize_rows(rows)
+        # 数字字段类型转换
+        for h in holdings:
+            for _k in ['qty','avail_qty']:
+                if _k in h: h[_k] = int(h[_k]) if h[_k] else 0
+            for _k in ['current_price','cost_price','market_value','profit_amount','profit_pct']:
+                if _k in h: h[_k] = float(h[_k]) if h[_k] else 0.0
+            # 计算已持仓天数(实际交易日:统计交易日天数,不是全量K线行数)
+            buy_date = h.get('trade_date')
+            hold_days = 0
+            if buy_date:
+                try:
+                    from datetime import datetime as _dt
+                    td_str = trade_date[:10] if len(trade_date) >= 10 and trade_date[4]=='-' else _dt.now().strftime('%Y-%m-%d')
+                    bd_str = str(buy_date)[:10]
+                    c2 = db_cursor(commit=False)
+                    try:
+                        with c2 as c:
+                            c.execute(
+                                "SELECT COUNT(DISTINCT trade_date) AS cnt FROM daily_kline WHERE trade_date BETWEEN %s AND %s",
+                                (bd_str, td_str)
+                            )
+                            r2 = c.fetchone()
+                            hold_days = r2['cnt'] if r2 else 0
+                    except:
+                        pass
+                except:
+                        pass
+            h['hold_days'] = hold_days
+            h['over_20d'] = 1 if hold_days >= 20 else 0
+
+        # 批量获取实时价（rt_k接口批量取出所有持仓）
+        try:
+            import tushare as _ts, os
+            _token = os.environ.get('TUSHARE_TOKEN', '')
+            if not _token:
+                import pymysql
+                _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+                    password=_mysql_pass(),database='openclaw_config',charset='utf8mb4')
+                _cu2 = _c2.cursor()
+                _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+                _r2 = _cu2.fetchone()
+                if _r2: _token = _r2[0]
+                _cu2.close(); _c2.close()
+            if _token:
+                _ts.set_token(_token)
+                _pro = _ts.pro_api()
+                _codes = [h['ts_code'] for h in holdings]
+                if _codes:
+                    _rt_all = _pro.rt_k(ts_code=','.join(_codes))
+                    if _rt_all is not None and len(_rt_all) > 0:
+                        _price_map = dict(zip(_rt_all['ts_code'], _rt_all['close'].astype(float)))
+                        for h in holdings:
+                            if h['ts_code'] in _price_map:
+                                h['current_price'] = _price_map[h['ts_code']]
+        except Exception as _e:
+            logger.warning(f"rt_k批量获取失败: {_e}")
+
+        total_mv = sum(float(h['market_value'] or 0) for h in holdings)
+        total_pa = sum(float(h['profit_amount'] or 0) for h in holdings)
+
+        acc_dict = serialize_rows([account])[0] if account else None
+        if acc_dict:
+            for _k in ['total_assets','total_market_value','available_cash']:
+                if _k in acc_dict: acc_dict[_k] = float(acc_dict[_k]) if acc_dict[_k] else 0.0
+        return api_success({
+            'date': trade_date,
+            'account': acc_dict,
+            'total_market_value': round(total_mv, 2),
+            'total_profit': round(total_pa, 2),
+            'holdings': holdings,
+        })
+    except Exception as e:
+        logger.error(f"portfolio_holdings error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/portfolio/history ────────────────
+@app.route('/api/v1/management/portfolio/history', methods=['GET'])
+def portfolio_hist():
+    """查询持仓历史"""
+    try:
+        ts_code = request.args.get('ts_code', '')
+        limit = int(request.args.get('limit', 30))
+
+        with db_cursor(commit=False) as cur:
+            if ts_code:
+                cur.execute("SELECT * FROM portfolio_holdings WHERE ts_code=%s ORDER BY trade_date DESC LIMIT %s", (ts_code, limit))
+            else:
+                cur.execute("SELECT * FROM portfolio_holdings ORDER BY trade_date DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+
+        return api_success({'records': serialize_rows(rows)})
+    except Exception as e:
+        logger.error(f"portfolio_history error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/portfolio/account-history ──────
+@app.route('/api/v1/management/portfolio/account-history', methods=['GET'])
+def acct_hist():
+    try:
+        limit = int(request.args.get('limit', 30))
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM portfolio_account ORDER BY trade_date DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+        return api_success({'records': serialize_rows(rows)})
+    except Exception as e:
+        logger.error(f"account_history error: {e}")
+        return api_error(str(e))
+
+
+
+
+# ─── POST /api/v1/management/portfolio/update-position-date ─┐
+@app.route('/api/v1/management/portfolio/update-position-date', methods=['POST'])
+def update_position_date():
+    try:
+        data = request.get_json()
+        ts_code = data.get('ts_code', '')
+        new_date = data.get('trade_date', '')
+        user_id = data.get('user_id', 'tony')
+        if not ts_code or not new_date:
+            return api_error('参数不足')
+        with db_cursor() as cur:
+            cur.execute("""
+                UPDATE portfolio_holdings SET trade_date=%s, updated_at=NOW()
+                WHERE user_id=%s AND ts_code=%s AND status='HOLDING'
+                ORDER BY trade_date DESC LIMIT 1
+            """, (new_date, user_id, ts_code))
+        return api_success({'ts_code': ts_code, 'trade_date': new_date})
+    except Exception as e:
+        logger.error(f"update_position_date error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/portfolio/recalc ─────────────────
+@app.route('/api/v1/management/portfolio/recalc', methods=['GET'])
+def portfolio_recalc():
+    """重算单只股票评分和建议"""
+    try:
+        ts_code = request.args.get('ts_code', '')
+        if not ts_code: return api_error('缺少ts_code')
+
+        from score_engine import score_chanlun_enhanced
+        from engine.cycle_scorer import score_cycle_enhanced
+        from engine.indicators import rsi, sma
+        from engine.sentiment_scorer import score_sentiment
+        from engine.block_weights import get_block_weights, apply_block_weights
+        from engine.vmap import vmap_score
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            mr = cur.fetchone()
+            mkt_sea = mr['season'] if mr else 'chaos'
+
+            cur.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
+            i300 = cur.fetchone()
+            regime = 'bull' if i300 and float(i300['raw_score']or 0)>3 else ('bear' if i300 and float(i300['raw_score']or 0)<-2 else 'range')
+
+            cur.execute("SELECT MAX(trade_date) as d FROM daily_kline")
+            ld = cur.fetchone()['d']
+            cur.execute("SELECT COUNT(*) as t, SUM(CASE WHEN change_pct>0 THEN 1 ELSE 0 END) as up FROM daily_kline WHERE trade_date=%s",(ld,))
+            br = cur.fetchone()
+            breadth = br['up']/br['t'] if br and br['t'] else 0.5
+
+            cur.execute("SELECT industry FROM stock_basic WHERE ts_code=%s",(ts_code,))
+            ind_r = cur.fetchone(); industry = ind_r['industry'] if ind_r else '未知'
+
+            cur.execute("SELECT trade_date, high, low, close, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(ts_code,))
+            rows = cur.fetchall()
+            if len(rows) < 200: return api_error(f'{ts_code} 数据不足({len(rows)}日)')
+
+            closes = [float(r['close']) for r in rows]; vols = [float(r.get('vol',0)or 0) for r in rows]
+            chgs = [float(r.get('change_pct')or 0) for r in rows]; n=len(closes)
+            all_win=[{'close':closes[i],'high':float(rows[i]['high']),'low':float(rows[i]['low']),'vol':vols[i]} for i in range(n)]
+
+            bw = get_block_weights(industry)
+            chanlun = score_chanlun_enhanced(all_win, mkt_sea, industry, ts_code=ts_code)
+            cycle = score_cycle_enhanced(mkt_sea, regime, 2.0, industry, closes)
+            l2_raw = apply_block_weights(chanlun['trend'],chanlun['momentum'],chanlun['volatility'],chanlun['volume'],bw)
+            cl_total = round(max(0,min(100,l2_raw+chanlun['chanlun_signal']*0.15)),1)
+            r14=rsi(closes,14); v5m=sma(vols[-10:],5) if len(vols)>=10 else vols[-1]; v20m=sma(vols[-25:],20) if len(vols)>=25 else v5m
+            vol_reg='high' if v5m>v20m*1.3 else ('low' if v5m<v20m*0.7 else 'normal')
+            sent=score_sentiment(breadth,vol_reg,r14,chgs[-1] if chgs else 0)
+            raw=cycle.score*0.30+cl_total*0.40+sent.score*0.30; v=vmap_score(raw,25)
+            
+            from engine.vmap import classify_signal
+            sig_result=classify_signal(v,cycle.strategy,{'trend':chanlun['trend']})
+            sig_type,sig_label=sig_result.signal,sig_result.label
+            if sig_type in ('STRONG_BUY','BUY'): advice,reason='🟢 持有/加仓',f'V={v:.0f}/趋势{chanlun["trend"]:.0f}'
+            elif sig_type in ('SELL',): advice,reason='🔴 建议卖出',f'V={v:.0f}/趋势{chanlun["trend"]:.0f}'
+            else: advice,reason='⏸️ 持有观察',f'V={v:.0f}/趋势{chanlun["trend"]:.0f}'
+
+            cur2 = db_cursor()
+            # 实时价: 优先用 Tushare rt_k
+            cp=float(closes[-1])
+            try:
+                import tushare as _ts
+                _token = _ts._token_  # 已初始化的token
+                if not _token:
+                    _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+                        password=_mysql_pass(),database='openclaw_config',charset='utf8mb4')
+                    _cu2 = _c2.cursor()
+                    _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+                    _r2 = _cu2.fetchone()
+                    if _r2:
+                        _token = _r2[0]
+                        _ts.set_token(_token)
+                    _cu2.close(); _c2.close()
+                if _token:
+                    _pro = _ts.pro_api()
+                    _rt = _pro.rt_k(ts_code=ts_code)
+                    if _rt is not None and len(_rt) > 0:
+                        cp = float(_rt.iloc[-1]['close'])
+            except:
+                pass
+            with cur2 as cur3:
+                cur3.execute("SELECT cost_price, qty FROM portfolio_holdings WHERE user_id='tony' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",(ts_code,))
+                hr=cur3.fetchone()
+                cost=float(hr['cost_price']) if hr and hr['cost_price'] else 1
+                qty=int(hr['qty']) if hr and hr['qty'] else 0
+                profit_amt=round((cp-cost)*qty,2)
+                profit_pct=round((cp-cost)/cost*100,2) if cost>0 else 0
+                cur3.execute("""
+                    UPDATE portfolio_holdings SET current_price=%s, profit_amount=%s, profit_pct=%s,
+                    advice=%s, advice_reason=%s, updated_at=NOW()
+                    WHERE user_id='tony' AND ts_code=%s AND status='HOLDING'
+                    ORDER BY trade_date DESC LIMIT 1
+                """, (cp, profit_amt, profit_pct, advice, reason, ts_code))
+
+            return api_success({'ts_code':ts_code,'v_score':v,'advice':advice,'reason':reason})
+    except Exception as e:
+        logger.error(f"portfolio_recalc error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/portfolio/recalc-all ──────────────
+@app.route('/api/v1/management/portfolio/recalc-all', methods=['GET'])
+def portfolio_recalc_all():
+    try:
+        import sys,os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from score_engine import score_chanlun_enhanced
+        from engine.cycle_scorer import score_cycle_enhanced
+        from engine.indicators import rsi, sma
+        from engine.sentiment_scorer import score_sentiment
+        from engine.block_weights import get_block_weights, apply_block_weights
+        from engine.vmap import vmap_score
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("""
+                SELECT ph.* FROM portfolio_holdings ph
+                INNER JOIN (SELECT ts_code, MAX(trade_date) as md FROM portfolio_holdings WHERE status='HOLDING' GROUP BY ts_code) lst
+                ON ph.ts_code=lst.ts_code AND ph.trade_date=lst.md WHERE ph.status='HOLDING'
+            """)
+            holdings = cur.fetchall()
+
+            cur.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            mr=cur.fetchone(); mkt_sea=mr['season'] if mr else 'chaos'
+            cur.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
+            i300=cur.fetchone(); regime='bull' if i300 and float(i300['raw_score']or 0)>3 else ('bear' if i300 and float(i300['raw_score']or 0)<-2 else 'range')
+            cur.execute("SELECT MAX(trade_date) as d FROM daily_kline"); ld=cur.fetchone()['d']
+            cur.execute("SELECT COUNT(*) as t, SUM(CASE WHEN change_pct>0 THEN 1 ELSE 0 END) as up FROM daily_kline WHERE trade_date=%s",(ld,))
+            br=cur.fetchone(); breadth=br['up']/br['t'] if br and br['t'] else 0.5
+
+        updated=0
+        for h in holdings:
+            try:
+                # 复用评分逻辑
+                code=h['ts_code']; cur=db_cursor()
+                with cur as c:
+                    c.execute("SELECT industry FROM stock_basic WHERE ts_code=%s",(code,))
+                    ir=c.fetchone(); industry=ir['industry'] if ir else '未知'
+                    c.execute("SELECT trade_date,high,low,close,vol,change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(code,))
+                    rows=c.fetchall()
+                    if len(rows)<200: continue
+
+                    closes=[float(r['close']) for r in rows]; vols=[float(r.get('vol',0)or 0) for r in rows]
+                    chgs=[float(r.get('change_pct')or 0) for r in rows]; n=len(closes)
+                    all_win=[{'close':closes[i],'high':float(rows[i]['high']),'low':float(rows[i]['low']),'vol':vols[i]} for i in range(n)]
+                    bw=get_block_weights(industry)
+                    chanlun=score_chanlun_enhanced(all_win,mkt_sea,industry,ts_code=code)
+                    cycle=score_cycle_enhanced(mkt_sea,regime,2.0,industry,closes)
+                    l2=apply_block_weights(chanlun['trend'],chanlun['momentum'],chanlun['volatility'],chanlun['volume'],bw)
+                    cl=round(max(0,min(100,l2+chanlun['chanlun_signal']*0.15)),1)
+                    r14=rsi(closes,14); v5m=sma(vols[-10:],5) if len(vols)>=10 else vols[-1]; v20m=sma(vols[-25:],20) if len(vols)>=25 else v5m
+                    vol_reg='high' if v5m>v20m*1.3 else ('low' if v5m<v20m*0.7 else 'normal')
+                    sent=score_sentiment(breadth,vol_reg,r14,chgs[-1] if chgs else 0)
+                    raw=cycle.score*0.30+cl*0.40+sent.score*0.30; v=vmap_score(raw,25)
+                    from engine.vmap import classify_signal
+                    sig_result=classify_signal(v,cycle.strategy,{'trend':chanlun['trend']})
+                    advice,reason=('🟢 持有/加仓',f'V={v:.0f}/趋势{chanlun["trend"]:.0f}') if sig_result.signal in ('STRONG_BUY','BUY') else ('⏸️ 持有',f'V={v:.0f}/趋势{chanlun["trend"]:.0f}')
+                    # 实时价: 优先用 Tushare rt_k 接口获取盘中实时行情
+                    cp=float(closes[-1])  # fallback
+                    try:
+                        import tushare as _ts
+                        _token = os.environ.get('TUSHARE_TOKEN', '')
+                        if _token:
+                            _ts.set_token(_token)
+                            _pro = _ts.pro_api()
+                            _rt = _pro.rt_k(ts_code=code)
+                            if _rt is not None and len(_rt) > 0:
+                                cp = float(_rt.iloc[-1]['close'])
+                    except:
+                        pass
+                    cost=float(h['cost_price'] or 1); qty=int(h['qty'] or 0)
+                    profit_amt=round((cp-cost)*qty,2)
+                    profit_pct=round((cp-cost)/cost*100,2) if cost>0 else 0
+                    c.execute("UPDATE portfolio_holdings SET current_price=%s,profit_amount=%s,profit_pct=%s,advice=%s,advice_reason=%s,updated_at=NOW() WHERE user_id='tony' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                              (cp,profit_amt,profit_pct,advice,reason,code))
+                    updated+=1
+            except Exception as _re:
+                logger.warning(f"  recalc {h.get('ts_code','?')}: {_re}")
+                pass
+
+        return api_success({'updated': updated})
+    except Exception as e:
+        logger.error(f"portfolio_recalc_all error: {e}")
+        return api_error(str(e))
+
+
+
+
+
+
+# ─── POST /api/v1/management/watch-pool/refresh ────────────
+@app.route('/api/v1/management/watch-pool/refresh', methods=['POST'])
+def watch_pool_refresh():
+    """刷新监控池评分快照 → 计算全部78只并写入watch_pool_snapshot"""
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from score_engine import score_chanlun_enhanced
+        from engine.cycle_scorer import score_cycle_enhanced
+        from engine.indicators import rsi, sma
+        from engine.sentiment_scorer import score_sentiment
+        from engine.block_weights import get_block_weights, apply_block_weights
+        from engine.vmap import vmap_score
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            mr=cur.fetchone(); mkt_sea=mr['season'] if mr else 'chaos'
+            cur.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
+            i300=cur.fetchone(); regime='bull' if i300 and float(i300['raw_score']or 0)>3 else ('bear' if i300 and float(i300['raw_score']or 0)<-2 else 'range')
+            cur.execute("SELECT MAX(trade_date) as d FROM daily_kline"); ld=cur.fetchone()['d']
+            cur.execute("SELECT COUNT(*) as t, SUM(CASE WHEN change_pct>0 THEN 1 ELSE 0 END) as up FROM daily_kline WHERE trade_date=%s",(ld,))
+            br=cur.fetchone(); breadth=br['up']/br['t'] if br and br['t'] else 0.5
+            trade_date = str(ld) if ld else str(date.today())
+
+            cur.execute("SELECT wp.ts_code, wp.name, sb.industry FROM watch_pool wp LEFT JOIN stock_basic sb ON wp.ts_code=sb.ts_code WHERE wp.is_active=1 AND wp.user_id='tony'")
+            stocks = cur.fetchall()
+
+        total = len(stocks)
+        updated = 0
+        errors = []
+
+        for i, s in enumerate(stocks):
+            code = s['ts_code']; name = s['name']; industry = s.get('industry') or '未知'
+            try:
+                cur2=db_cursor()
+                with cur2 as c:
+                    c.execute("SELECT trade_date, high, low, close, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(code,))
+                    rows = c.fetchall()
+                    if len(rows) < 200:
+                        errors.append(f"{code}数据不足"); continue
+
+                    closes=[float(r['close']) for r in rows]; vols=[float(r.get('vol',0)or 0) for r in rows]
+                    chgs=[float(r.get('change_pct')or 0) for r in rows]; n=len(closes)
+                    all_win=[{'close':closes[j],'high':float(rows[j]['high']),'low':float(rows[j]['low']),'vol':vols[j]} for j in range(n)]
+
+                    bw=get_block_weights(industry)
+                    chanlun=score_chanlun_enhanced(all_win,mkt_sea,industry)
+                    cycle=score_cycle_enhanced(mkt_sea,regime,2.0,industry,closes)
+                    l2=apply_block_weights(chanlun["trend"],chanlun["momentum"],chanlun["volatility"],chanlun["volume"],bw)
+                    cl=round(max(0,min(100,l2+chanlun["chanlun_signal"]*0.15)),1)
+                    r14=rsi(closes,14)
+                    v5m=sma(vols[-10:],5) if len(vols)>=10 else vols[-1]; v20m=sma(vols[-25:],20) if len(vols)>=25 else v5m
+                    vol_reg='high' if v5m>v20m*1.3 else ('low' if v5m<v20m*0.7 else 'normal')
+                    sent=score_sentiment(breadth,vol_reg,r14,chgs[-1] if chgs else 0)
+                    raw=cycle.score*0.30+cl*0.40+sent.score*0.30
+                    v=vmap_score(raw,25)
+
+                    from engine.vmap import classify_signal
+                    sig_result=classify_signal(v,cycle.strategy,{'trend':chanlun["trend"]})
+                    signal=sig_result.signal; sig_label=sig_result.label
+
+                    pos=50*1.0*0.6
+                    if chanlun["trend"]>=90: pos=50*1.4*0.6
+                    elif chanlun["trend"]>=70: pos=50*1.2*0.6
+                    elif chanlun["trend"]<30: pos=50*0.5*0.6
+                    pos=max(5,min(100,pos))
+
+                    rets={}
+                    for p in [5,10,20]:
+                        if len(closes)>p: rets[p]=round((closes[-1]-closes[-p-1])/closes[-p-1]*100,2)
+
+                    c.execute("""INSERT INTO watch_pool_snapshot
+                        (ts_code, name, trade_date, close_price, change_pct, raw_score, v_score,
+                         trend_score, momentum_score, volatility_score, volume_score,
+                         signal_type, signal_label, position_pct, stop_loss_pct, strategy_type,
+                         season, regime, ret_5d, ret_10d, ret_20d)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                            close_price=VALUES(close_price), change_pct=VALUES(change_pct),
+                            raw_score=VALUES(raw_score), v_score=VALUES(v_score),
+                            signal_type=VALUES(signal_type), signal_label=VALUES(signal_label),
+                            position_pct=VALUES(position_pct), trend_score=VALUES(trend_score)
+                    """, (code, name, trade_date, closes[-1], chgs[-1], round(raw,1), v,
+                          chanlun["trend"], chanlun["momentum"], chanlun["volatility"], chanlun["volume"],
+                          signal, sig_label, round(pos,1), 0, cycle.strategy,
+                          mkt_sea, regime, rets.get(5,0), rets.get(10,0), rets.get(20,0)))
+                    updated+=1
+            except Exception as e2:
+                errors.append(f"{code}:{e2}")
+
+            if (i+1)%20==0:
+                with db_cursor() as c:
+                    pass  # keepalive
+
+        return api_success({'total': total, 'updated': updated, 'errors': errors[:5]})
+    except Exception as e:
+        logger.error(f"watch_pool_refresh error: {e}")
+        return api_error(str(e))
+
+# ─── GET /api/v1/management/watch-pool/snapshot ────────────
+@app.route('/api/v1/management/watch-pool/snapshot', methods=['GET'])
+def watch_pool_snapshot():
+    try:
+        trade_date = request.args.get('date', '')
+        with db_cursor(commit=False) as cur:
+            # JOIN stock_basic 获取行业信息
+            if trade_date:
+                cur.execute("""
+                    SELECT wps.*, sb.industry
+                    FROM watch_pool_snapshot wps
+                    LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
+                    WHERE wps.trade_date=%s ORDER BY wps.v_score DESC
+                """,(trade_date,))
+            else:
+                cur.execute("""
+                    SELECT wps.*, sb.industry
+                    FROM watch_pool_snapshot wps
+                    LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
+                    WHERE wps.trade_date=(SELECT MAX(trade_date) FROM watch_pool_snapshot) ORDER BY wps.v_score DESC
+                """)
+            rows = cur.fetchall()
+
+            # 补上恒纪元数据(从daily_snapshot或者strategy_signal获取最近的恒纪元状态)
+            cur.execute(
+                "SELECT hengjiyuan_level, hengjiyuan_score FROM daily_snapshot "
+                "WHERE trade_date=(SELECT MAX(trade_date) FROM daily_snapshot WHERE hengjiyuan_level IS NOT NULL) "
+                "LIMIT 1"
+            )
+            heng_row = cur.fetchone()
+
+        result_list = serialize_rows(rows)
+
+        if heng_row:
+            heng_level = heng_row['hengjiyuan_level']
+            heng_score = float(heng_row['hengjiyuan_score']) if heng_row['hengjiyuan_score'] else None
+            for item in result_list:
+                item['hengjiyuan_level'] = heng_level
+                item['hengjiyuan_score'] = heng_score
+        else:
+            # fallback: 从season_state推断
+            for item in result_list:
+                item['hengjiyuan_level'] = 'weak_heng'
+                item['hengjiyuan_score'] = 50
+
+        return api_success({'list': result_list, 'date': str(rows[0]['trade_date']) if rows else ''})
+    except Exception as e:
+        logger.error(f"watch_pool_snapshot error: {e}")
+        return api_error(str(e))
+# ─── Watch Pool 监控股票池 ─────────────────────────────
+@app.route('/api/v1/management/watch-pool/list', methods=['GET'])
+def watch_pool_list():
+    user_id = request.args.get('user_id', 'tony')
+    with db_cursor(commit=False) as cur:
+        cur.execute("SELECT wp.* FROM watch_pool wp WHERE wp.user_id=%s AND wp.is_active=1 ORDER BY wp.sort_order, wp.created_at", (user_id,))
+        return api_success({'list': serialize_rows(cur.fetchall())})
+
+@app.route('/api/v1/management/watch-pool/add', methods=['POST'])
+def watch_pool_add():
+    data = request.get_json()
+    ts_code = data.get('ts_code', '')
+    if not ts_code: return api_error('缺少ts_code')
+    with db_cursor() as cur:
+        cur.execute("INSERT INTO watch_pool (user_id, ts_code, name) VALUES ('tony', %s, %s) ON DUPLICATE KEY UPDATE is_active=1", (ts_code, data.get('name', '')))
+    return api_success({'ts_code': ts_code})
+
+@app.route('/api/v1/management/watch-pool/remove', methods=['POST'])
+def watch_pool_remove():
+    data = request.get_json()
+    with db_cursor() as cur:
+        cur.execute("UPDATE watch_pool SET is_active=0 WHERE user_id='tony' AND ts_code=%s", (data.get('ts_code', '')))
+    return api_success({})
+
+@app.route('/api/v1/management/portfolio/watch-list', methods=['GET'])
+def portfolio_watch_list():
+    with db_cursor(commit=False) as cur:
+        cur.execute("""
+            SELECT wp.ts_code, wp.name, wp.sort_order,
+                   dk.close, dk.change_pct, dk.vol
+            FROM watch_pool wp
+            LEFT JOIN daily_kline dk ON wp.ts_code = dk.ts_code
+                AND dk.trade_date = (SELECT MAX(trade_date) FROM daily_kline)
+            WHERE wp.user_id='tony' AND wp.is_active=1
+            ORDER BY wp.sort_order
+        """)
+        return api_success({'list': serialize_rows(cur.fetchall())})
+
+
+
+# ─── POST /api/v1/management/cycle/refresh ────────────────
+@app.route('/api/v1/management/cycle/refresh', methods=['POST'])
+def cycle_refresh():
+    """手动更新四季季节判定"""
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from season_engine import SeasonEngine
+        engine = SeasonEngine(use_market_breadth=False)
+        r = engine.judge_market_season()
+        from datetime import date as dt
+        if not r.get('trade_date') or str(r.get('trade_date')) == 'None':
+            r['trade_date'] = str(dt.today())
+        from season_engine import save_result_to_db; save_result_to_db(r)
+        engine.close()
+        logger.info(f"季节判定已更新: {r['market_season']} 得分{r['raw_score']:.1f}")
+        return api_success({'season': r['market_season'], 'raw_score': r['raw_score'], 'confidence': r['market_confidence']})
+    except Exception as e:
+        logger.error(f"cycle_refresh error: {e}")
+        return api_error(str(e))
+
+
+
+# ─── GET /api/v1/management/daily-summary ──────────────────
+@app.route('/api/v1/management/daily-summary', methods=['GET'])
+def daily_summary():
+    """统一市场汇总 - 数出一源"""
+    try:
+        from datetime import date as dt
+        from score_engine import score_chanlun_enhanced
+        from engine.cycle_scorer import score_cycle_enhanced
+        from engine.indicators import rsi, sma
+        from engine.sentiment_scorer import score_sentiment
+        from engine.block_weights import get_block_weights, apply_block_weights
+        from engine.vmap import vmap_score, classify_signal
+
+        with db_cursor(commit=False) as cur:
+            # 写一行汇总数据
+            cur.execute("SELECT season, raw_score, confidence FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            ss = cur.fetchone()
+            cur.execute("SELECT hengjiyuan_level, hengjiyuan_score, confidence_mult FROM daily_snapshot ORDER BY trade_date DESC LIMIT 1")
+            snap = cur.fetchone()
+            cur.execute("SELECT MAX(trade_date) as d FROM daily_kline"); ld=cur.fetchone()['d']
+            cur.execute("SELECT COUNT(*) as t, SUM(CASE WHEN change_pct>0 THEN 1 ELSE 0 END) as up FROM daily_kline WHERE trade_date=%s",(ld,))
+            br=cur.fetchone(); breadth=round(br['up']/br['t'],3) if br and br['t'] else 0.5
+
+            cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN signal_type='BUY' THEN 1 ELSE 0 END) as buy, SUM(CASE WHEN signal_type='SELL' THEN 1 ELSE 0 END) as sell FROM watch_pool_snapshot WHERE trade_date=(SELECT MAX(trade_date) FROM watch_pool_snapshot)")
+            wp = cur.fetchone()
+
+            cur.execute("SELECT total_assets, total_market_value, available_cash FROM portfolio_account ORDER BY trade_date DESC LIMIT 1")
+            pa = cur.fetchone()
+
+        season = ss['season'] if ss else 'chaos'
+        season_score = float(ss['raw_score'] or 0) if ss else 0
+        season_conf = float(ss['confidence'] or 0) if ss else 0
+        hj_level = snap['hengjiyuan_level'] if snap else ''
+        hj_score = float(snap['hengjiyuan_score'] or 0) if snap else 0
+        hj_conf = float(snap['confidence_mult'] or 0) if snap else 0
+
+        data = {
+            'trade_date': str(ld) if ld else str(dt.today()),
+            'season': season, 'raw_score': season_score, 'season_score': season_score,
+            'season_confidence': season_conf,
+            'regime': 'bull' if season_score>3 else ('bear' if season_score<-2 else 'range'),
+            'hengjiyuan_level': hj_level, 'hengjiyuan_score': hj_score, 'hengjiyuan_confidence': hj_conf,
+            'breadth_up_ratio': breadth,
+            'watch_pool_total': int(wp['total']) if wp else 0,
+            'watch_pool_buy': int(wp['buy']) if wp else 0,
+            'watch_pool_sell': int(wp['sell']) if wp else 0,
+            'watch_pool_hold': int((wp['total']-wp['buy']-wp['sell'])) if wp else 0,
+            'portfolio_total': float(pa['total_market_value']) if pa else 0,
+            'portfolio_profit': 0,
+            'portfolio_cash': float(pa['available_cash']) if pa else 0,
+        }
+
+        # 写入汇总表
+        try:
+            with db_cursor() as cur2:
+                cur2.execute("""INSERT INTO daily_market_summary
+                    (trade_date, season, season_score, season_confidence, regime,
+                     hengjiyuan_level, hengjiyuan_score, hengjiyuan_confidence,
+                     breadth_up_ratio, total_stocks, buy_count, sell_count, hold_count,
+                     watch_pool_total, watch_pool_buy, watch_pool_sell, watch_pool_hold,
+                     portfolio_total, portfolio_cash)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,0,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                        season=VALUES(season), season_score=VALUES(season_score),
+                        hengjiyuan_level=VALUES(hengjiyuan_level), hengjiyuan_score=VALUES(hengjiyuan_score),
+                        breadth_up_ratio=VALUES(breadth_up_ratio),
+                        watch_pool_total=VALUES(watch_pool_total), watch_pool_buy=VALUES(watch_pool_buy),
+                        watch_pool_sell=VALUES(watch_pool_sell), watch_pool_hold=VALUES(watch_pool_hold),
+                        portfolio_total=VALUES(portfolio_total), portfolio_cash=VALUES(portfolio_cash)
+                """, (data['trade_date'], season, season_score, season_conf, data['regime'],
+                      hj_level, hj_score, hj_conf, breadth,
+                      data['watch_pool_total'], data['watch_pool_buy'], data['watch_pool_sell'], data['watch_pool_hold'],
+                      data['portfolio_total'], data['portfolio_cash']))
+        except: pass
+
+        return api_success(data)
+    except Exception as e:
+        logger.error(f"daily_summary error: {e}")
+        return api_error(str(e))
+
+
+# ─── GET /api/v1/management/market-indexes ──────────────────
+@app.route('/api/v1/management/market-indexes', methods=['GET'])
+def market_indexes():
+    """大盘指数评分状态"""
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("""
+                SELECT ss.index_code, sb.name, ss.season, ss.raw_score, ss.confidence, ss.regime, ss.chaos_subtype, ss.trade_date
+                FROM season_state ss
+                LEFT JOIN stock_basic sb ON ss.index_code = sb.ts_code
+                WHERE ss.index_code IN ('000001.SH','000300.SH','399001.SZ','399006.SZ','000688.SH')
+                  AND ss.trade_date = (SELECT MAX(trade_date) FROM season_state WHERE index_code=ss.index_code)
+                ORDER BY ss.raw_score DESC
+            """)
+            rows = cur.fetchall()
+        indexes = []
+        for r in rows:
+            se = r['season'] or 'chaos'
+            indexes.append({
+                'ts_code': r['index_code'],
+                'name': r['name'] or r['index_code'],
+                'season': se,
+                'season_emoji': {'spring':'🌸','summer':'☀️','autumn':'🍂','winter':'❄️',
+                                 'chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️',
+                                 'panic':'💀','recovery':'🌱'}.get(se, '❓'),
+                'raw_score': float(r['raw_score']) if r['raw_score'] else 0,
+                'confidence': float(r['confidence']) if r['confidence'] else 0,
+                'regime': r.get('regime',''),
+                'chaos_subtype': r.get('chaos_subtype',''),
+                'trade_date': str(r['trade_date']),
+            })
+        return api_success({'indexes': indexes, 'total': len(indexes)})
+    except Exception as e:
+        logger.error(f"market_indexes error: {e}")
+        return api_error(str(e))
+
+
+# ═══ 邮件推送 ═══
+_EMAIL_TO = '12211662@qq.com'
+
+def _send_email(subject, body):
+    """发送QQ邮件"""
+    import smtplib, json
+    from email.mime.text import MIMEText
+    try:
+        cfg_path = '/root/.openclaw/workspace-may/skills/email-sender-tw/scripts/smtp_config.json'
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        acc = None
+        for a in cfg.get('accounts', []):
+            if a.get('name') == 'qqmail': acc = a; break
+        if not acc: return False, '无QQ邮箱配置'
+        msg = MIMEText(body, 'plain', 'utf-8')
+        msg['From'] = acc['email']
+        msg['To'] = _EMAIL_TO
+        msg['Subject'] = subject
+        server = smtplib.SMTP_SSL(acc['smtp_server'], acc['smtp_port'])
+        server.login(acc['email'], acc['password'])
+        server.send_message(msg)
+        server.quit()
+        return True, 'ok'
+    except Exception as e:
+        return False, str(e)
+
+
+# ─── POST /api/v1/management/email/send-report ────────────
+@app.route('/api/v1/management/email/send-report', methods=['POST'])
+def email_send_report():
+    """发送持仓报告邮件"""
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT season, confidence, position_advice FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            ss = cur.fetchone()
+            season = ss['season'] if ss else '?'
+            conf = float(ss['confidence']) if ss and ss['confidence'] else 0
+            advice = ss.get('position_advice', '') if ss else ''
+
+            cur.execute("""
+                SELECT ts_code, name, current_price, cost_price, qty, profit_pct, advice
+                FROM portfolio_holdings WHERE status='HOLDING'
+                ORDER BY profit_pct DESC
+            """)
+            holdings = cur.fetchall()
+
+        se_emoji = {'spring':'🌸','summer':'☀️','autumn':'🍂','winter':'❄️',
+                     'chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️',
+                     'panic':'💀','recovery':'🌱'}.get(season, '❓')
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+        body = f'📊 股票持仓报告 — {now_str}\n\n'
+        body += f'季节: {se_emoji} {season}\n'
+        body += f'置信度: {conf*100:.0f}% | 建议: {advice or "--"}\n\n'
+        body += '持仓明细:\n' + '='*40 + '\n'
+        for h in holdings:
+            pct = float(h['profit_pct'] or 0)
+            emoji = '🔴' if pct < 0 else '🟢'
+            body += f'{emoji} {h["ts_code"]} {h["name"]}\n'
+            body += f'   现价: {float(h["current_price"] or 0):.2f} | 成本: {float(h["cost_price"] or 0):.2f}\n'
+            body += f'   持仓: {int(h["qty"] or 0)}股 | 盈亏: {pct:+.2f}%\n'
+            body += f'   建议: {h.get("advice","--")}\n\n'
+        body += '='*40 + '\n'
+        body += '发送自 股票智能分析管理系统 v1.0'
+
+        ok, msg = _send_email('[股票系统] 持仓报告 ' + now_str[:10], body)
+        if ok:
+            logger.info(f"邮件报告发送成功")
+            return api_success({'sent': True, 'to': _EMAIL_TO})
+        else:
+            return api_error(msg)
+    except Exception as e:
+        logger.error(f"email_send_report error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/email/send-alert ─────────────
+@app.route('/api/v1/management/email/send-alert', methods=['POST'])
+def email_send_alert():
+    """发送预警邮件"""
+    try:
+        data = request.get_json(force=True) or {}
+        alert_type = data.get('type', '普通预警')
+        message = data.get('message', '')
+        ok, msg = _send_email(f'[股票系统] ⚠️ {alert_type}', message)
+        if ok:
+            return api_success({'sent': True})
+        else:
+            return api_error(msg)
+    except Exception as e:
+        logger.error(f"email_send_alert error: {e}")
+        return api_error(str(e))
+
+
+# ─── 启动 ───────────────────────────────────────────────────
+if __name__ == '__main__':
+    logger.info("Starting management API server on port 8887...")
+    app.run(host='0.0.0.0', port=8887, debug=False)
