@@ -1,3 +1,7 @@
+# ⚠️ DEPRECATED: 此文件已废弃，保留仅作参考。
+# 当前评分用 score_engine.py + engine/ 模块
+# 数据源：Tushare Pro (daily_kline_qfq)
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """

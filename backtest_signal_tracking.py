@@ -27,6 +27,8 @@ def get_pass():
 DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':get_pass(),
       'database':'stock_db','charset':'utf8mb4'}
 
+COST_RATE = 0.003  # 交易成本: 万3佣金+千1印花税
+
 def main():
     conn = pymysql.connect(**DB)
     cur = conn.cursor(pymysql.cursors.DictCursor)
