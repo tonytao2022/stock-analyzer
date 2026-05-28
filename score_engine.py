@@ -491,8 +491,56 @@ class ScoreEngineV4:
             money_flow_net=mf_net, money_flow_lg=mf_lg, money_flow_elg=mf_elg,
             tech_macd_bar=tc_macd, tech_boll_pos=tc_boll, tech_kdj_j=tc_kdj)
 
-        # 三层合成
-        raw_score=cycle['score']*0.30+chanlun_total*0.40+sentiment.score*0.30
+        # ═══ P0-1: ATR+量能潮汐因子 ═══
+        tide_boost = 0
+        tide_detail = ''
+        season = mkt.get('season', 'chaos')
+        if len(closes) >= 60 and len(vols) >= 20:
+            # 因子6: 波动率变化方向 (vol_change)
+            atr_short = atr(highs, lows, closes, 14)
+            atr_long = atr(highs, lows, closes, 60)
+            atr_ratio = atr_short / max(atr_long, 0.001)
+            # 波动收缩 → 酝酿方向确认
+            if atr_ratio < 0.8:
+                tide_boost += 4
+                tide_detail += f'波动收缩(ATR比={atr_ratio:.2f}) +4; '
+            elif atr_ratio > 1.3:
+                # 波动放大 → 风险信号（混沌期权重加倍）
+                chg_sign = 1 if chgs[-1] > 0 else -1
+                boost = -4 * (2 if season in ('chaos','chaos_autumn') else 1)
+                tide_boost += boost
+                tide_detail += f'波动放大(ATR比={atr_ratio:.2f}) {boost:+d}; '
+            else:
+                tide_detail += f'波动正常(ATR比={atr_ratio:.2f}) +0; '
+
+            # 因子7: 量能潮汐 (volume_tide)
+            vol_ma20 = sma(vols, 20)
+            vol_dev = (vols[-1] - vol_ma20) / max(vol_ma20, 1) * 100
+            # 仅混沌期启用量能潮汐
+            if season in ('chaos', 'chaos_spring', 'chaos_autumn'):
+                if vol_dev > 30 and chgs[-1] > 0:
+                    tide_boost += 5
+                    tide_detail += f'放量上涨(量偏离{vol_dev:.0f}%) +5'
+                elif vol_dev > 30 and chgs[-1] < 0:
+                    tide_boost -= 3
+                    tide_detail += f'放量下跌(量偏离{vol_dev:.0f}%) -3'
+                elif vol_dev < -20:
+                    tide_detail += f'缩量观望(量偏离{vol_dev:.0f}%) +0'
+                else:
+                    tide_detail += f'量能正常(量偏离{vol_dev:.0f}%) +0'
+            else:
+                # 非混沌期：缩量回踩是机会
+                if vol_dev < -20 and chgs[-1] > 0:
+                    tide_boost += 3
+                    tide_detail += f'缩量上涨(健康,量偏离{vol_dev:.0f}%) +3'
+                elif vol_dev > 30 and chgs[-1] > 0:
+                    tide_boost += 2
+                    tide_detail += f'放量上攻(量偏离{vol_dev:.0f}%) +2'
+                else:
+                    tide_detail += f'量能正常(量偏离{vol_dev:.0f}%) +0'
+
+        # 三层合成（+ 潮汐因子校准）
+        raw_score=cycle['score']*0.30+chanlun_total*0.40+sentiment.score*0.30 + tide_boost
         v_score=vmap_score(raw_score,25)
 
         # 仓位
@@ -549,6 +597,7 @@ class ScoreEngineV4:
             'trend_score':chanlun['trend'],'momentum_score':chanlun['momentum'],
             'volatility_score':chanlun['volatility'],'volume_score':chanlun['volume'],
             'chanlun_signal':chanlun['chanlun_signal'],
+            'tide_boost':tide_boost,'tide_detail':tide_detail,
             'sector_boost':cycle.get('sector_boost',0),
             # 板块权重
             'block_weights':{k:round(v,2) for k,v in bw.items()},
