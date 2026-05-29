@@ -7,8 +7,7 @@ source venv/bin/activate 2>/dev/null || true
 
 # 从 MySQL 读取 TUSHARE_TOKEN
 MYSQL_PWD=$(grep 'password' /etc/mysql/debian.cnf | head -1 | awk -F'= ' '{print $2}' | xargs)
-TUSHARE_TOKEN=*** -u debian-sys-maint -p"$MYSQL_PWD" openclaw_config -N -e "SELECT api_key FROM api_credentials WHERE name='''TUSHARE_TOKEN'' AND is_active=1 LIMIT 1" 2>/dev/null
-  "SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1 LIMIT 1" 2>/dev/null
+TUSHARE_TOKEN=$(mysql --defaults-file=/etc/mysql/debian.cnf -N -e "SELECT api_key FROM openclaw_config.api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1 LIMIT 1" 2>/dev/null)
 export TUSHARE_TOKEN
 
 echo "验证Token: ${TUSHARE_TOKEN:0:10}..."
