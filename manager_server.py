@@ -2393,7 +2393,7 @@ def get_stock_notes():
         offset = (page - 1) * limit
         _cur.execute(f"""
             SELECT ts_code, name, note_date, report_type, 
-                   LEFT(full_report, 300) as full_report, summary
+                   full_report, summary
             FROM stock_notes WHERE {where_sql}
             ORDER BY note_date DESC
             LIMIT %s OFFSET %s
