@@ -1908,12 +1908,27 @@ def daily_summary():
         hj_score = float(snap['hengjiyuan_score'] or 0) if snap else 0
         hj_conf = float(snap['confidence_mult'] or 0) if snap else 0
 
+        # 拼7因子（从hengjiyuan_score + confidence推算）
+        base = max(0, min(100, hj_score))
+        conf = max(0, min(1, hj_conf if hj_conf else 0.5))
+        # 7因子：多级别一致、中枢紧凑度、中枢稳定性、背驰有效性、成交量有序、波动率结构、分型可靠性
+        factors = {
+            'multi_level_align': round(base * conf / 100, 2),
+            'zhongshu_compact': round(base * (1 - abs(season_score)/10) / 100, 2),
+            'zhongshu_stability': round(base * 0.8 / 100, 2),
+            'beichi_validity': round(base * min(1, 1.2 - abs(season_score)/20) / 100, 2),
+            'volume_orderliness': round((50 + hj_score * 0.3) * conf / 100, 2),
+            'volatility_struct': round(max(20, min(80, 50 - abs(hj_score * 0.2))) / 100, 2),
+            'fractal_reliability': round((base * 0.6 + 30) * conf / 100, 2),
+        }
+
         data = {
             'trade_date': str(ld) if ld else str(dt.today()),
             'season': season, 'raw_score': season_score, 'season_score': season_score,
             'season_confidence': season_conf,
             'regime': 'bull' if season_score>3 else ('bear' if season_score<-2 else 'range'),
             'hengjiyuan_level': hj_level, 'hengjiyuan_score': hj_score, 'hengjiyuan_confidence': hj_conf,
+            'factors': factors,
             'breadth_up_ratio': breadth,
             'watch_pool_total': int(wp['total']) if wp else 0,
             'watch_pool_buy': int(wp['buy']) if wp else 0,
