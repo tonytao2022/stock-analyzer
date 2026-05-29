@@ -1146,51 +1146,71 @@ def backtest_pool_detail(ts_code):
 # ─── GET /api/v1/management/signal-cards ────────────────────
 @app.route('/api/v1/management/signal-cards', methods=['GET'])
 def signal_cards():
-    """Phase 3: 信号卡片 - 基于v2.0评分+v3.0季节生成BUY/HOLD/SELL"""
+    """Phase 3: 信号卡片 - 基于v2.0评分+v3.0季节生成BUY/HOLD/SELL（从数据库读取，不重复评分）"""
     try:
-        from score_engine import ScoreEngineV4
-        engine = ScoreEngineV4()
-        mkt = engine.get_market_context()
         cards = []
         emoji_map = {'spring':'🌸','summer':'☀️','autumn':'🍂','winter':'❄️','chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','panic':'💀','recovery':'🌱'}
 
         with db_cursor(commit=False) as cur:
-            cur.execute("SELECT ts_code, name FROM backtest_pool WHERE status='ACTIVE' AND market!='指数' ORDER BY ts_code")
-            stocks = cur.fetchall()
-
-        # 批量评分 (只取评分成功的)
-        raw_results = engine.score_pool()
-
-        for r in raw_results:
+            cur.execute("SELECT season, raw_score FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            mr = cur.fetchone()
+            mkt_season = mr['season'] if mr else 'chaos'
+            mkt_score = float(mr['raw_score'] or 0) if mr else 0
+            
+            cur.execute("""
+                SELECT ts.ts_code, sb.name, ts.composite_score, ts.raw_score, ts.cycle_score,
+                       ts.structure_score, ts.emotion_score, ts.close_price,
+                       ss.direction, ss.position_pct, ss.reason_chain,
+                       ss.operation_mode
+                FROM trend_score ts
+                JOIN backtest_pool bp ON ts.ts_code = bp.ts_code AND bp.status='ACTIVE' AND bp.market!='指数'
+                LEFT JOIN stock_basic sb ON ts.ts_code = sb.ts_code
+                LEFT JOIN strategy_signal ss ON ts.ts_code = ss.ts_code AND ss.trade_date = ts.trade_date
+                WHERE ts.trade_date = (SELECT MAX(trade_date) FROM trend_score)
+                ORDER BY ts.composite_score DESC
+            """)
+            rows = cur.fetchall()
+            
+        for r in rows:
+            ts_code = r['ts_code']
+            v_score = float(r['composite_score'] or 50)
+            signal = r['direction'] or 'HOLD'
+            sig_label = '⏸️持有'
+            # 从direction推断信号标签
+            emoji_label = {'BUY':'🟢买入','STRONG_BUY':'🟢强烈买入','CAUTIOUS_BUY':'🟡谨慎买入','HOLD':'⏸️持有','SELL':'🔴卖出','WAIT':'⏳等待','REV_BUY':'🟣反转买入'}
+            sig_label = emoji_label.get(signal, '⏸️持有')
+            
             cards.append({
-                    'ts_code': r['ts_code'], 'name': r.get('name',''),
-                    'close': r['close'], 'change_pct': r['change_pct'],
-                    'raw_score': r['raw_score'], 'v_score': r['v_score'],
-                    'cycle_score': r['cycle_score'],
-                    'chanlun_score': r['chanlun_score'],
-                    'sentiment_score': r['sentiment_score'],
-                    'trend_score': r['trend_score'],
-                    'momentum_score': r['momentum_score'],
-                    'volatility_score': r['volatility_score'],
-                    'volume_score': r['volume_score'],
-                    'signal': r['signal'], 'signal_label': r['signal_label'],
-                    'position_pct': r['position_pct'],
-                    'strategy': r['strategy'],
-                    'stop_loss_pct': r.get('stop_loss_pct', -0.05),
-                    'industry': r.get('industry', ''),
-                    'chanlun_signal': r.get('chanlun_signal', 0),
-                    'risk_flags': r['risk_flags'],
-                    'season': r['season'], 'season_emoji': emoji_map.get(r['season'],'❓'),
-                })
-
-
-        engine.close()
-
-        # 按V分排序
+                'ts_code': ts_code,
+                'name': r['name'] or '',
+                'close': float(r['close_price'] or 0),
+                'change_pct': 0,
+                'raw_score': float(r['raw_score'] or 50),
+                'v_score': v_score,
+                'cycle_score': float(r['cycle_score'] or 0),
+                'chanlun_score': float(r['structure_score'] or 0),
+                'sentiment_score': float(r['emotion_score'] or 0),
+                'trend_score': float(r['structure_score'] or 0),
+                'momentum_score': 0,
+                'volatility_score': 0,
+                'volume_score': 0,
+                'signal': signal,
+                'signal_label': sig_label,
+                'position_pct': float(r['position_pct'] or 0),
+                'strategy': r['operation_mode'] or 'momentum',
+                'stop_loss_pct': -0.05,
+                'industry': '',
+                'chanlun_signal': 0,
+                'risk_flags': [],
+                'season': mkt_season,
+                'season_emoji': emoji_map.get(mkt_season, '❓'),
+            })
+        
         cards.sort(key=lambda x: x['v_score'], reverse=True)
-
+        
         return api_success({
-            'season': mkt['season'], 'season_emoji': emoji_map.get(mkt['season'], '❓'),
+            'season': mkt_season,
+            'season_emoji': emoji_map.get(mkt_season, '❓'),
             'total': len(cards),
             'buy_count': sum(1 for c in cards if c['signal'] in ('STRONG_BUY','BUY')),
             'cautious_count': sum(1 for c in cards if c['signal'] == 'CAUTIOUS_BUY'),
