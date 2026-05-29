@@ -2352,19 +2352,61 @@ def ai_analyze():
 
 @app.route('/api/v1/management/stock-notes', methods=['GET'])
 def get_stock_notes():
-    """查询股票历史AI分析备注"""
+    """查询股票历史AI分析备注（支持按代码/名称/日期）"""
     try:
         import sys as _sn_sys
         _sn_sys.path.insert(0, '/opt/stock-analyzer')
-        from ai_analysis_engine import get_stock_notes as _get_notes
         
         ts_code = request.args.get('ts_code', '')
-        limit = int(request.args.get('limit', 10))
-        if not ts_code:
-            return api_error('缺少ts_code参数')
+        name = request.args.get('name', '')
+        date_from = request.args.get('date_from', '')
+        date_to = request.args.get('date_to', '')
+        limit = int(request.args.get('limit', 50))
+        page = int(request.args.get('page', 1))
         
-        rows = _get_notes(ts_code, limit)
-        return api_success({'notes': rows, 'total': len(rows)})
+        _p = _get_mysql_pass()
+        _conn = _pymysql2.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=_p, database='stock_db', charset='utf8mb4')
+        _cur = _conn.cursor(_pymysql2.cursors.DictCursor)
+        
+        wheres = []
+        params = []
+        if ts_code:
+            wheres.append('ts_code LIKE %s')
+            params.append(f'%{ts_code}%')
+        if name:
+            wheres.append('name LIKE %s')
+            params.append(f'%{name}%')
+        if date_from:
+            wheres.append('note_date >= %s')
+            params.append(date_from + ' 00:00:00')
+        if date_to:
+            wheres.append('note_date <= %s')
+            params.append(date_to + ' 23:59:59')
+        
+        where_sql = ' AND '.join(wheres) if wheres else '1=1'
+        
+        # 总数
+        _cur.execute(f"SELECT COUNT(*) as cnt FROM stock_notes WHERE {where_sql}", params)
+        total = _cur.fetchone()['cnt']
+        
+        # 分页
+        offset = (page - 1) * limit
+        _cur.execute(f"""
+            SELECT ts_code, name, note_date, report_type, 
+                   LEFT(full_report, 300) as full_report, summary
+            FROM stock_notes WHERE {where_sql}
+            ORDER BY note_date DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = _cur.fetchall()
+        _cur.close(); _conn.close()
+        
+        return api_success({
+            'notes': rows,
+            'total': total,
+            'page': page,
+            'limit': limit,
+        })
     except Exception as e:
         logger.error(f'stock_notes error: {e}')
         return api_error(str(e))
