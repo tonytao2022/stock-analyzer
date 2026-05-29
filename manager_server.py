@@ -2324,6 +2324,52 @@ def strategy_run():
     else:
         return api_error(f'策略评估失败: {msg}')
 
+
+# ═══ AI个股分析 API ════════════════════════════════════════
+@app.route('/api/v1/management/ai/analyze', methods=['POST'])
+def ai_analyze():
+    """AI个股分析：采集数据→DeepSeek→保存至stock_notes"""
+    try:
+        import sys as _ai_sys
+        _ai_sys.path.insert(0, '/opt/stock-analyzer')
+        from ai_analysis_engine import analyze_stock
+        
+        body = request.get_json()
+        if not body or not body.get('ts_code'):
+            return api_error('缺少ts_code参数')
+        
+        ts_code = body['ts_code'].strip()
+        result = analyze_stock(ts_code)
+        
+        if result.get('code') == 0:
+            return api_success(result['data'])
+        else:
+            return api_error(result.get('error', '分析失败'))
+    except Exception as e:
+        logger.error(f'ai_analyze error: {e}')
+        return api_error(str(e))
+
+
+@app.route('/api/v1/management/stock-notes', methods=['GET'])
+def get_stock_notes():
+    """查询股票历史AI分析备注"""
+    try:
+        import sys as _sn_sys
+        _sn_sys.path.insert(0, '/opt/stock-analyzer')
+        from ai_analysis_engine import get_stock_notes as _get_notes
+        
+        ts_code = request.args.get('ts_code', '')
+        limit = int(request.args.get('limit', 10))
+        if not ts_code:
+            return api_error('缺少ts_code参数')
+        
+        rows = _get_notes(ts_code, limit)
+        return api_success({'notes': rows, 'total': len(rows)})
+    except Exception as e:
+        logger.error(f'stock_notes error: {e}')
+        return api_error(str(e))
+
+
 @app.route('/api/v1/management/strategy/holdings-actions', methods=['GET'])
 def strategy_holdings_actions():
     """获取持仓买卖建议（前端主页面调用，自动同步建仓时间）"""
