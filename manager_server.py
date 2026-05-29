@@ -2293,8 +2293,16 @@ def strategy_signals():
 
 @app.route('/api/v1/management/strategy/run', methods=['POST'])
 def strategy_run():
-    """手动触发策略评估"""
+    """手动触发策略评估（自动同步持仓建仓时间）"""
     _td = request.args.get('trade_date')
+    
+    # 先同步所有持仓的 buy_date（从 trade_date 补充，确保建仓时间最新）
+    try:
+        with db_cursor() as _sync_cur:
+            _sync_cur.execute("UPDATE portfolio_holdings SET buy_date = trade_date WHERE status='HOLDING' AND buy_date IS NULL")
+    except:
+        pass
+    
     ok, msg = _run_strategy_eval(_td)
     if ok:
         return api_success({'message': '策略评估完成', 'trade_date': _td or str(date.today())})
@@ -2303,9 +2311,16 @@ def strategy_run():
 
 @app.route('/api/v1/management/strategy/holdings-actions', methods=['GET'])
 def strategy_holdings_actions():
-    """获取持仓买卖建议（前端主页面调用）"""
+    """获取持仓买卖建议（前端主页面调用，自动同步建仓时间）"""
     _p = _get_mysql_pass()
     try:
+        # 先同步持仓建仓时间
+        _sync_c = _pymysql2.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=_p, database='stock_db', charset='utf8mb4')
+        _sync_cur = _sync_c.cursor()
+        _sync_cur.execute("UPDATE portfolio_holdings SET buy_date = trade_date WHERE status='HOLDING' AND buy_date IS NULL")
+        _sync_c.commit()
+        _sync_cur.close(); _sync_c.close()
+        
         _c = _pymysql2.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=_p, database='stock_db', charset='utf8mb4')
         _cc = _c.cursor(_pymysql2.cursors.DictCursor)
         _cc.execute("""
