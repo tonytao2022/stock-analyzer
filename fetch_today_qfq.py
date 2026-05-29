@@ -5,9 +5,22 @@
 每个请求间隔0.2秒，总耗时控制在60秒内
 """
 import pymysql, os, time, sys, json
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import tushare as _ts
+
+# ─── 超时控制 ───
+REQUEST_TIMEOUT = 10  # 单次Tushare请求超时秒数
+FETCH_DAYS = 60  # 每次只拉最近60天数据
+
+# 给requests库设默认超时（Tushare底层用requests）
+import requests
+from requests.adapters import HTTPAdapter
+session = requests.Session()
+session.mount('https://', HTTPAdapter(pool_maxsize=20))
+session.mount('http://', HTTPAdapter(pool_maxsize=20))
+_ts._adapter = session
 
 # ─── 密码 ───
 def get_pwd():
@@ -20,7 +33,7 @@ def get_pwd():
 PWD = get_pwd()
 DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':PWD,'database':'stock_db','charset':'utf8mb4'}
 
-# ─── Token ───
+# ─── 最新交易日动态获取 ───
 def get_token():
     tk = os.environ.get('TUSHARE_TOKEN', '')
     if tk: return tk
@@ -32,13 +45,32 @@ def get_token():
     return r[0] if r else ''
 
 # ─── 获取待更新股票列表 ───
+def get_latest_trade_day():
+    """从Tushare获取最新交易日"""
+    import tushare as _ts2
+    tk = get_token()
+    if tk:
+        _ts2.set_token(tk)
+        pro = _ts2.pro_api()
+        # 加超时、限制查询范围
+        end_dt = (datetime.now() + timedelta(days=1)).strftime('%Y%m%d')
+        start_dt = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+        cal = pro.trade_cal(exchange='SSE', start_date=start_dt, end_date=end_dt)
+        if cal is not None and len(cal) > 0:
+            open_days = cal[cal['is_open']==1]
+            if len(open_days) > 0:
+                return open_days.iloc[-1]['cal_date']
+    return '20260528'  # fallback
+
+LATEST_TRADE_DAY = get_latest_trade_day()
+
 def get_missing_stocks():
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(f"""
         SELECT bp.ts_code
         FROM backtest_pool bp
-        LEFT JOIN daily_kline_qfq d ON bp.ts_code = d.ts_code AND d.trade_date = '2026-05-28'
+        LEFT JOIN daily_kline_qfq d ON bp.ts_code = d.ts_code AND d.trade_date = '{LATEST_TRADE_DAY}'
         WHERE bp.status='ACTIVE' AND bp.market!='指数' AND d.id IS NULL
     """)
     codes = [r[0] for r in cur.fetchall()]
@@ -55,8 +87,11 @@ t0 = time.time()
 def fetch_one(code):
     global ok_count, fail_count
     try:
+        # 只拉最近FETCH_DAYS天数据（避免全量历史请求超时）
+        from datetime import datetime, timedelta
+        start = (datetime.now() - timedelta(days=FETCH_DAYS)).strftime('%Y%m%d')
         pro = _ts.pro_api()
-        df = pro.daily(ts_code=code, start_date='20260101', end_date='20260528')
+        df = pro.daily(ts_code=code, start_date=start, end_date=f'{LATEST_TRADE_DAY}')
         if df is not None and len(df) > 0:
             conn = pymysql.connect(**DB)
             cur = conn.cursor()
