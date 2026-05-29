@@ -722,7 +722,7 @@ def refresh_realtime():
         from engine.sentiment_scorer import score_sentiment
         from engine.block_weights import get_block_weights, apply_block_weights
         from engine.vmap import vmap_score, classify_signal
-        import pymysql, tushare as _ts
+        import pymysql as _pymysql2, tushare as _ts
 
         # 获取 Tushare token
         def _get_token():
@@ -730,7 +730,7 @@ def refresh_realtime():
             tk = os.environ.get('TUSHARE_TOKEN', '')
             if tk: return tk
             _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-                password=_get_mysql_pass())
+                password=_get_mysql_pass(), database='stock_db', charset='utf8mb4')
             _cu2 = _c2.cursor()
             _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
             _r2 = _cu2.fetchone()
@@ -745,7 +745,6 @@ def refresh_realtime():
         pro = _ts.pro_api()
 
         # 获取监控池股票列表
-        import pymysql as _pymysql
         _pwd = ''
         try:
             with open('/etc/mysql/debian.cnf') as _pf:
@@ -754,10 +753,11 @@ def refresh_realtime():
                         _pwd = _pl.split('=')[-1].strip().strip('"').strip("'")
                         break
         except: pass
-        _conn = __pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+        _conn = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
             password=_pwd, database='stock_db', charset='utf8mb4')
-        cur = _conn.cursor(__pymysql2.cursors.DictCursor)
-        cur.execute("SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id=''+_get_user_id()+''")
+        cur = _conn.cursor(_pymysql2.cursors.DictCursor)
+        uid = _get_user_id()
+        cur.execute("SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id=%s", (uid,))
         watch_codes = [r['ts_code'] for r in cur.fetchall()]
         cur.execute("SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'")
         bt_codes = [r['ts_code'] for r in cur.fetchall()]

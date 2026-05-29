@@ -85,6 +85,7 @@ BLOCK_WEIGHTS: Dict[str, Dict[str, float]] = {
     '影视音像': {'trend': 0.30, 'momentum': 0.35, 'volatility': 0.15, 'volume': 0.20},
 }
 
+_DEFAULT_WEIGHTS = {'trend': 0.35, 'momentum': 0.30, 'volatility': 0.20, 'volume': 0.15}
 
 
 def get_block_weights(industry: str) -> Dict[str, float]:
