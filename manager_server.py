@@ -71,11 +71,13 @@ def health():
         with db_cursor(commit=False) as cur:
             cur.execute("SELECT 1")
             db_ok = cur.fetchone() is not None
+        api_key_value = _get_api_key()
         return api_success({
             'service': 'management_api',
             'port': 8887,
             'database': 'connected' if db_ok else 'disconnected',
-            'version': '2.0.0'
+            'version': '2.0.0',
+            'api_key': api_key_value if api_key_value else '',
         })
     except Exception as e:
         return api_error(str(e), http_status=500)
