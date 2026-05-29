@@ -1809,9 +1809,9 @@ def watch_pool_snapshot():
 # ─── Watch Pool 监控股票池 ─────────────────────────────
 @app.route('/api/v1/management/watch-pool/list', methods=['GET'])
 def watch_pool_list():
-    user_id = request.args.get('user_id', 'tony')
     with db_cursor(commit=False) as cur:
-        cur.execute("SELECT wp.* FROM watch_pool wp WHERE wp.user_id=%(uid_arg)s AND wp.is_active=1 ORDER BY wp.sort_order, wp.created_at", (user_id,))
+        uid6 = _get_user_id()
+        cur.execute("SELECT wp.* FROM watch_pool wp WHERE wp.user_id=%s AND wp.is_active=1 ORDER BY wp.sort_order, wp.created_at", (uid6,))
         return api_success({'list': serialize_rows(cur.fetchall())})
 
 @app.route('/api/v1/management/watch-pool/add', methods=['POST'])
