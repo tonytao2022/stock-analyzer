@@ -147,6 +147,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .dashboard-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px}
 @media(max-width:1200px){.dashboard-cards{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:768px){.dashboard-cards{grid-template-columns:1fr}}
+@media(max-width:480px){.dashboard-cards{grid-template-columns:1fr}}
 .dash-main-card{background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;text-align:center}
 .dash-main-card .dash-icon{font-size:36px;margin-bottom:8px}
 .dash-main-card .dash-value{font-size:28px;font-weight:700;color:var(--text-bright);margin:8px 0}
@@ -156,8 +157,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 @media(max-width:1000px){.dashboard-grid{grid-template-columns:1fr}}
 .chart-container{width:100%;min-height:360px}
 .gauges-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}
-@media(max-width:800px){.gauges-row{grid-template-columns:1fr}}
-.pagination{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px}
+@media(max-width:768px){.gauges-row{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.gauges-row{grid-template-columns:1fr}}
+.pagination{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px;flex-wrap:wrap}
 .pagination button{padding:6px 14px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);border-radius:var(--radius-sm);cursor:pointer;font-size:13px;transition:all var(--transition)}
 .pagination button:hover{background:var(--bg-card-hover)}
 .pagination button.active{background:var(--border-accent);border-color:var(--border-accent);color:#fff}
@@ -210,7 +212,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 <div class="app-layout" id="appRoot">
 
 <!-- ═══ 侧边栏 ═══ -->
-<aside class="sidebar">
+<button class="hamburger" id="hamburgerBtn" onclick="toggleSidebar()">&#9776;</button>
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+<aside class="sidebar" id="sidebar">
   <div class="sidebar-logo">
     <div class="title">&#x1F4C8; 股票智能分析</div>
     <div class="subtitle">悟道篇 &#xD7; 缠论 &#xD7; 恒纪元</div>
@@ -224,6 +228,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
     <div class="nav-item" data-page="watch-pool-manage"><span class="nav-icon">&#x1F50D;</span> 监控池管理</div>
     <div class="nav-item" data-page="portfolio-manage"><span class="nav-icon">&#x1F4BC;</span> &#x1F50D; 持股管理</div>
     <div class="nav-item" data-page="signals"><span class="nav-icon">&#x1F4E1;</span> 策略信号</div>
+    <div class="nav-item" onclick="window.open('/stock-manager/strategy.html','_blank')" style="cursor:pointer"><span class="nav-icon">&#x1F9F0;</span> 阶梯策略</div>
+    <div class="nav-item" onclick="window.open('/stock-manager/portfolio-charts.html','_blank')" style="cursor:pointer"><span class="nav-icon">&#x1F4CA;</span> 持仓图表</div>
+    <div class="nav-item" onclick="window.open('/stock-manager/ai-analysis.html','_blank')" style="cursor:pointer"><span class="nav-icon">&#x1F9E0;</span> AI分析</div>
+    <div class="nav-item" onclick="window.open('/stock-manager/stock-notes.html','_blank')" style="cursor:pointer"><span class="nav-icon">&#x1F4CB;</span> 分析备注</div>
+    <div class="nav-item" onclick="window.open('https://52etf.site','_blank')" style="cursor:pointer"><span class="nav-icon">&#x1F30D;</span> 大盘云图</div>
+    <div class="nav-item" onclick="window.open('https://piao.topyou.vip','_blank')" style="cursor:pointer"><span class="nav-icon">&#x1F3AF;</span> 打板分类统计</div>
     <div class="nav-item" data-page="scores"><span class="nav-icon">&#x1F3C6;</span> 全量评分</div>
     <div class="nav-item" data-page="history"><span class="nav-icon">&#x1F4C5;</span> 历史查询</div>
     <div class="nav-divider"></div>
@@ -233,6 +243,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
     <div class="nav-item" data-page="backtest-pool"><span class="nav-icon">&#x1F3AF;</span> 回测池管理</div>
     <div class="nav-item" data-page="params"><span class="nav-icon">&#x2699;&#xFE0F;</span> 策略参数</div>
     <div class="nav-divider"></div>
+    <div class="nav-item" onclick="window.open('/stock-manager/cron-monitor.html','_self')" style="cursor:pointer"><span class="nav-icon">&#x23F1;&#xFE0F;</span> 任务监控</div>
     <div class="nav-section-title">&#x2699;&#xFE0F; 系统</div>
     <div class="nav-item" data-page="system"><span class="nav-icon">&#x1F6E0;&#xFE0F;</span> 系统管理</div>
   </nav>
@@ -348,6 +359,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
         <div class="search-bar">
           <input type="text" class="search-input" id="scoreSearch" placeholder="&#x1F50D; 搜索股票代码或名称..." oninput="filterScores()">
+          <select class="filter-select" id="scoreSignalFilter" onchange="filterScores()">
+            <option value="">&#x1F4CB; 全部信号</option>
+            <option value="STRONG_BUY">&#x1F7E2;&#x1F53C; 强烈买入</option>
+            <option value="BUY">&#x1F7E2; 买入</option>
+            <option value="CAUTIOUS_BUY">&#x1F7E1; 谨慎买入</option>
+            <option value="HOLD">&#x1F535; 持有</option>
+            <option value="SELL">&#x26AB; 卖出</option>
+            <option value="WAIT">&#x23F3; 观望</option>
+          </select>
           <select class="filter-select" id="scoreSortBy" onchange="filterScores()">
             <option value="composite_score_desc">&#x1F4CA; 综合评分&#x2193;</option>
             <option value="cycle_score_desc">&#x1F504; 周期评分&#x2193;</option>
@@ -534,6 +554,79 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
   <div class="modal" id="modalContent"></div>
 </div>
 <script>
+/* ═══ 手机端汉堡菜单 CSS ═══ */
+.hamburger{display:none;position:fixed;top:10px;left:12px;z-index:110;background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);width:40px;height:40px;align-items:center;justify-content:center;cursor:pointer;font-size:24px;color:var(--text-bright);transition:all var(--transition)}
+.hamburger:hover{background:var(--bg-card-hover);border-color:var(--border-light)}
+.hamburger.active{left:242px}
+.sidebar-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99}
+@media(max-width:768px){
+  .hamburger{display:flex}
+  .sidebar{transform:translateX(-100%);transition:transform 0.3s ease;position:fixed;z-index:100}
+  .sidebar.open{transform:translateX(0)}
+  .sidebar-overlay.show{display:block}
+  .main-content{margin-left:0}
+  .page-content{padding:12px}
+  .top-bar{padding:0 12px;padding-left:56px;height:48px}
+  .top-bar .breadcrumb{font-size:14px}
+  .dashboard-cards{grid-template-columns:repeat(2,1fr)!important}
+  .dashboard-grid{grid-template-columns:1fr!important}
+  .gauges-row{grid-template-columns:repeat(2,1fr)!important}
+  .signal-grid{grid-template-columns:1fr!important}
+  .portfolio-grid{grid-template-columns:1fr!important}
+  .portfolio-card .pf-metrics{grid-template-columns:1fr 1fr!important}
+  .search-bar{flex-direction:column;align-items:stretch!important}
+  .search-bar .search-input,.search-bar .filter-select{width:100%!important}
+  .card{padding:12px!important}
+  .dash-main-card{padding:12px!important}
+  .dash-main-card .dash-icon{font-size:24px!important}
+  .dash-main-card .dash-value{font-size:20px!important}
+  .dash-main-card .dash-label{font-size:11px!important}
+  .dash-main-card .dash-sub{font-size:10px!important}
+  .signal-card .stock-name{font-size:14px!important}
+  .signal-card .signal-details{grid-template-columns:1fr!important}
+  .signal-cards-row{grid-template-columns:1fr!important}
+  .portfolio-card .pf-name{font-size:14px!important}
+  .portfolio-card .pf-price{font-size:20px!important}
+  .portfolio-card .pf-metric .pf-m-value{font-size:13px!important}
+  .portfolio-card .pf-metric .pf-m-label{font-size:10px!important}
+  .data-table{font-size:11px!important}
+  .data-table thead th,.data-table tbody td{padding:6px 8px!important;font-size:11px!important}
+  .card-title{font-size:13px!important}
+  .card-subtitle{font-size:10px!important}
+  .btn{font-size:11px!important;padding:6px 10px!important}
+  .portfolio-card{padding:12px!important}
+  .signal-card{padding:12px!important}
+  .pagination button{font-size:11px!important;padding:4px 10px!important}
+  .filter-select{font-size:12px!important;padding:6px 10px!important}
+  .search-input{font-size:12px!important;padding:6px 10px!important;width:100%!important}
+  .backtest-table{font-size:11px!important}
+  .backtest-table th,.backtest-table td{padding:5px 8px!important;font-size:11px!important}
+  .modal{min-width:auto!important;width:95vw!important;padding:16px!important}
+  .card[style*="overflow-x:auto"] table{min-width:600px}
+  .data-table{overflow-x:auto;display:block}
+  .sidebar-logo .title{font-size:13px!important}
+  .nav-item{font-size:12px!important;padding:8px 14px!important}
+  .top-bar .market-status{font-size:11px!important;gap:8px!important}
+  .market-badge{font-size:10px!important;padding:2px 8px!important}
+}
+@media(max-width:480px){
+  .dashboard-cards{grid-template-columns:1fr 1fr!important}
+  .gauges-row{grid-template-columns:1fr!important}
+}
+/* ═══ 移动端字号大小优化 ═══ */
+@media(max-width:768px){
+  body{font-size:12px}
+  h1,h2,h3,h4{font-size:16px!important}
+  .signal-card .sc-price{font-size:18px!important}
+  .signal-card .sc-name{font-size:13px!important}
+  .signal-card .sc-chg{font-size:11px!important}
+  .score-bar .bar-value{font-size:12px!important}
+  .score-bar .bar-track{width:50px!important;height:4px!important}
+  #signalSummary,#portfolioSummary,#scoreSummary{font-size:11px!important}
+  .dash-main-card .dash-value{font-size:18px!important}
+  .dash-main-card .dash-label{font-size:10px!important}
+}
+
 /* ============================================================
    股票智能分析管理系统 v1.0 — 前端SPA
    悟道篇 × 缠论 × 恒纪元
@@ -581,7 +674,13 @@ function dirCls(d){ const x=(d||'').toUpperCase(); if(x.includes('BUY')) return'
 function toast(msg,type='info'){ const t=$$('toast'); t.textContent=msg; t.className='toast '+type+' show'; setTimeout(()=>t.classList.remove('show'),2500); }
 
 // ═══ 导航 ═══
-document.querySelectorAll('.nav-item').forEach(el=>{ el.addEventListener('click',()=>switchPage(el.dataset.page)); });
+// ═══ 汉堡菜单 ═══
+function toggleSidebar(){
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('sidebarOverlay').classList.toggle('show');
+  document.getElementById('hamburgerBtn').classList.toggle('active');
+}
+document.querySelectorAll('.nav-item').forEach(el=>{ el.addEventListener('click',()=>{ if(window.innerWidth<=768) toggleSidebar(); switchPage(el.dataset.page); }); });
 function switchPage(p){
   S.page=p;
   document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active'));
@@ -628,7 +727,7 @@ async function loadSignals(){
   try{
     const r=await GET('/management/signal-cards');
     const d=r?.data||{};
-    $$('signalSummary').textContent=`季节:${d.season_emoji||''}${d.season||''} | 买:${d.buy_count||0} 慎:${d.cautious_count||0} 持:${d.hold_count||0} 卖:${d.sell_count||0}`;
+    const _seasonMap={'spring':'🌸春季','summer':'☀️夏季','autumn':'🍂秋季','winter':'❄️冬季','chaos':'🌪️混沌','chaos_spring':'🌤️弱春','chaos_autumn':'🌥️弱秋','chaos_mild':'🌤️偏多','chaos_cold':'🌥️偏空','panic':'💀恐慌','recovery':'🌱复苏'}; $$('signalSummary').textContent=`季节:${_seasonMap[d.season]||d.season||''} | 买:${d.buy_count||0} 慎:${d.cautious_count||0} 持:${d.hold_count||0} 卖:${d.sell_count||0}`;
     let html='';
     (d.cards||[]).slice(0,12).forEach(c=>{
       const cls=c.signal==='STRONG_BUY'?'strong_buy':c.signal==='BUY'?'buy':c.signal==='CAUTIOUS_BUY'?'hold':c.signal==='SELL'?'sell':'hold';
@@ -814,9 +913,13 @@ async function loadPortfolioManage(filterCode, filterStatus){
     }
     
     // 操作指引
-    html+='<div class="card" style="margin-top:16px"><div class="card-header"><span class="card-title">📸 截图同步</span></div>';
-    html+='<p style="color:var(--text-secondary);font-size:13px">1. 打开国泰海通通财APP → 持仓页面 → 截图</p>';
-    html+='<p style="color:var(--text-secondary);font-size:13px">2. 发送截图到QQ → 系统自动解析并更新持仓</p></div>';
+    html+='<div class="card" style="margin-top:16px"><div class="card-header"><span class="card-title">📸 截图表导入</span></div>';
+    html+='<p style="color:var(--text-secondary);font-size:13px">1. 打开券商APP → 持仓页面 → 截图</p>';
+    html+='<p style="color:var(--text-secondary);font-size:13px">2. 点击下方按钮上传截图，系统自动解析持仓数据</p>';
+    html+='<div style="margin-top:12px;display:flex;gap:10px">';
+    html+='<button onclick="document.getElementById(\'screenshotFileInput\').click()" class="btn primary">📷 从截图导入</button>';
+    html+='<input type="file" id="screenshotFileInput" accept="image/png,image/jpeg,image/jpg" style="display:none" onchange="uploadScreenshot(this)">';
+    html+='</div></div>';
     
     $$('page-portfolio-manage').innerHTML=html;
     
@@ -1190,8 +1293,8 @@ async function loadSignals(){
   try{
     const sr=await GET('/management/watch-pool/snapshot');
     const all=sr?.data?.list||[];
-    // 只显示有明确信号(BUY/SELL)的股票
-    const sigs=all.filter(s=>s.signal_type==='BUY'||s.signal_type==='SELL');
+    // 显示有信号的股票（包含买入/谨慎买入/卖出）
+    const sigs=all.filter(s=>s.signal_type==='BUY'||s.signal_type==='SELL'||s.signal_type==='STRONG_BUY'||s.signal_type==='CAUTIOUS_BUY');
     if(!sigs.length){
       g.innerHTML='<div class="empty-state"><div class="empty-icon">📡</div><p>暂无买卖信号</p><p class="text-muted text-sm">请先点击"监控刷新"计算评分</p></div>';
       $$('signalSummary').textContent='0 条';
@@ -1278,7 +1381,15 @@ async function loadScores(){
 }
 function renderScoreTable(){
   const sortBy=$$('scoreSortBy').value;
+  const sigFilter=$$('scoreSignalFilter').value;
   let sorted=[...S.scores];
+  // 信号筛选（匹配signal_type字段，英文值如 HOLD/BUY/SELL）
+  if(sigFilter){
+    sorted=sorted.filter(s=>{
+      const sig=(s.signal_type||'').trim().toUpperCase();
+      return sig===sigFilter;
+    });
+  }
   const valid=sorted.filter(s=>(s.raw_score||s.v_score||50||-1)!==-1);
   const errs=sorted.filter(s=>(s.raw_score||s.v_score||50||-1)===-1);
   if(sortBy==='cycle_score_desc') valid.sort((a,b)=>(b.cycle_score||0)-(a.cycle_score||0));
@@ -1313,7 +1424,7 @@ function renderScoreTable(){
   for(let i=1;i<=tp;i++) ph+='<button class="'+(i===S.scorePage?'active':'')+'" onclick="S.scorePage='+i+';renderScoreTable();window.scrollTo(0,0);">'+i+'</button>';
   $$('scorePagination').innerHTML=ph+'<span class="page-info">共 '+sorted.length+' 条，'+tp+' 页</span>';
 }
-function filterScores(){ renderScoreTable(); }
+function filterScores(){ S.scorePage=1; renderScoreTable(); }
 async function refreshScores(){
   if(!confirm('将重新计算'+($$('scoreSummary').textContent||'监控池')+'所有股票的评分，确认？')) return;
   const btn=$$('btnRefreshScores');
@@ -1722,6 +1833,156 @@ async function unlockStock(tsCode, reason, name){
       showToast('❌ 解锁失败: '+(r?.message||''));
     }
   }catch(e){showToast('❌ 解锁请求失败');}
+}
+
+// ═══ 截图导入 ═══
+let screenshotPreviewData = null;
+
+async function uploadScreenshot(fileInput) {
+  const file = fileInput.files[0];
+  if (!file) return;
+  
+  // 验证格式
+  if (!file.type.match(/image\/(png|jpeg|jpg)/)) {
+    showToast('❌ 仅支持PNG/JPG格式');
+    fileInput.value = '';
+    return;
+  }
+  
+  // 验证大小（最大10MB）
+  if (file.size > 10 * 1024 * 1024) {
+    showToast('❌ 图片过大，请压缩后重试（最大10MB）');
+    fileInput.value = '';
+    return;
+  }
+  
+  showToast('⏳ 正在上传并OCR识别...');
+  
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    const r = await fetch(API + '/management/portfolio/import-screenshot', {
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(120000)
+    });
+    const result = await r.json();
+    
+    if (result?.code !== 0) {
+      showToast('❌ ' + (result?.message || '识别失败'));
+      fileInput.value = '';
+      return;
+    }
+    
+    const data = result.data;
+    const holdings = data.holdings || [];
+    
+    if (holdings.length === 0) {
+      showToast('❌ 未识别到持仓数据，请检查截图质量');
+      fileInput.value = '';
+      return;
+    }
+    
+    // 保存预览数据
+    screenshotPreviewData = {
+      holdings: holdings,
+      trade_date: data.trade_date,
+    };
+    
+    // 显示预览对话框
+    showScreenshotPreview(holdings, data.trade_date);
+    
+  } catch (e) {
+    showToast('❌ 上传失败: ' + e.message);
+  }
+  
+  fileInput.value = '';
+}
+
+function showScreenshotPreview(holdings, tradeDate) {
+  // 创建模态框
+  const overlay = document.createElement('div');
+  overlay.id = 'screenshotPreviewOverlay';
+  overlay.style.cssText = `
+    position:fixed;top:0;left:0;right:0;bottom:0;
+    background:rgba(0,0,0,0.7);z-index:9999;
+    display:flex;align-items:center;justify-content:center;
+    padding:20px;
+  `;
+  
+  let html = '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;max-width:900px;width:100%;max-height:80vh;overflow-y:auto;padding:24px">';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">';
+  html += '<span style="font-size:16px;font-weight:600;color:var(--text-bright)">📋 OCR识别结果</span>';
+  html += '<span style="color:var(--text-muted);font-size:13px">' + tradeDate + ' | 共' + holdings.length + '只</span>';
+  html += '</div>';
+  
+  // 表格
+  html += '<div style="overflow-x:auto"><table class="data-table" style="min-width:600px"><thead><tr>';
+  html += '<th>名称</th><th>数量</th><th>现价</th><th>成本价</th><th>市值</th><th>盈亏额</th><th>盈亏率</th>';
+  html += '</tr></thead><tbody>';
+  
+  holdings.forEach(h => {
+    const pct = parseFloat(h.profit_pct) || 0;
+    const color = pct >= 0 ? 'var(--color-bull)' : 'var(--color-bear)';
+    const mv = parseFloat(h.qty || 0) * parseFloat(h.current_price || 0);
+    const pnl = parseFloat(h.profit_amount || 0);
+    const pct2 = parseFloat(h.profit_pct || 0);
+    
+    html += '<tr>';
+    html += '<td style="font-weight:600;color:var(--text-bright)">' + (h.name || '--') + '</td>';
+    html += '<td>' + (h.qty || 0) + '</td>';
+    html += '<td>' + parseFloat(h.current_price || 0).toFixed(3) + '</td>';
+    html += '<td>' + parseFloat(h.cost_price || 0).toFixed(3) + '</td>';
+    html += '<td>' + mv.toFixed(2) + '</td>';
+    html += '<td style="color:' + color + '">' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '</td>';
+    html += '<td style="color:' + color + '">' + (pct2 >= 0 ? '+' : '') + pct2.toFixed(2) + '%</td>';
+    html += '</tr>';
+  });
+  
+  html += '</tbody></table></div>';
+  
+  // 操作按钮
+  html += '<div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end">';
+  html += '<button onclick="closeScreenshotPreview()" class="btn" style="padding:8px 20px">取消</button>';
+  html += '<button onclick="confirmScreenshotImport()" class="btn primary" style="padding:8px 20px">✅ 确认导入</button>';
+  html += '</div></div>';
+  
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+}
+
+function closeScreenshotPreview() {
+  const overlay = document.getElementById('screenshotPreviewOverlay');
+  if (overlay) overlay.remove();
+  screenshotPreviewData = null;
+}
+
+async function confirmScreenshotImport() {
+  if (!screenshotPreviewData) {
+    showToast('❌ 无预览数据');
+    return;
+  }
+  
+  showToast('⏳ 正在导入持仓...');
+  
+  try {
+    const r = await POST('/management/portfolio/import-screenshot/confirm', {
+      holdings: screenshotPreviewData.holdings,
+      trade_date: screenshotPreviewData.trade_date,
+    });
+    
+    if (r?.code === 0) {
+      closeScreenshotPreview();
+      showToast('✅ 已导入 ' + (r.data?.inserted || 0) + ' 条新增, ' + (r.data?.updated || 0) + ' 条更新');
+      // 刷新持仓列表
+      setTimeout(() => loadPortfolioManage(), 500);
+    } else {
+      showToast('❌ 导入失败: ' + (r?.error || r?.message || '未知错误'));
+    }
+  } catch (e) {
+    showToast('❌ 导入失败: ' + e.message);
+  }
 }
 
 // ═══ 初始化 ═══

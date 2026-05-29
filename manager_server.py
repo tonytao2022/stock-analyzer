@@ -2852,6 +2852,157 @@ def backtest_run():
         return api_error(str(e), code=500)
 
 
+# ════════════════════════════════════════════════════
+# API Key 管理（openclaw_config.api_credentials）
+# ════════════════════════════════════════════════════
+
+_CONFIG_DB_CFG = {
+    'host': '127.0.0.1',
+    'port': 3306,
+    'user': 'debian-sys-maint',
+    'database': 'openclaw_config',
+    'charset': 'utf8mb4',
+    'autocommit': True,
+}
+
+
+def _get_config_conn():
+    import pymysql as _pm
+    cfg = _CONFIG_DB_CFG.copy()
+    cfg['password'] = _get_mysql_pass()
+    cfg['cursorclass'] = _pm.cursors.DictCursor
+    return _pm.connect(**cfg)
+
+
+def _config_cursor(commit=True):
+    conn = _get_config_conn()
+    cursor = conn.cursor()
+    return conn, cursor
+
+
+@app.route('/api/v1/management/system/api-keys', methods=['GET'])
+def list_api_keys():
+    """获取所有 API Key 列表（key 值默认掩码）"""
+    try:
+        conn, cur = _config_cursor()
+        try:
+            cur.execute(
+                "SELECT id, name, provider, api_key, description, is_active, created_at, updated_at "
+                "FROM api_credentials ORDER BY id ASC"
+            )
+            rows = cur.fetchall()
+            keys = []
+            for r in rows:
+                ak = r['api_key'] or ''
+                masked = ak[:6] + '****' + ak[-4:] if len(ak) > 12 else '****'
+                keys.append({
+                    'id': r['id'],
+                    'name': r['name'],
+                    'provider': r['provider'],
+                    'api_key': masked,
+                    'api_key_masked': True,
+                    'description': r.get('description', ''),
+                    'is_active': bool(r['is_active']),
+                    'created_at': r['created_at'].isoformat() if r.get('created_at') else None,
+                    'updated_at': r['updated_at'].isoformat() if r.get('updated_at') else None,
+                })
+            return api_success(keys)
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        logger.error(f"list_api_keys error: {e}")
+        return api_error(str(e), code=500)
+
+
+@app.route('/api/v1/management/system/api-keys/<int:key_id>', methods=['GET'])
+def get_api_key(key_id):
+    """获取单个 API Key（含明文）"""
+    try:
+        conn, cur = _config_cursor()
+        try:
+            cur.execute(
+                "SELECT id, name, provider, api_key, description, is_active, created_at, updated_at "
+                "FROM api_credentials WHERE id=%s", (key_id,)
+            )
+            r = cur.fetchone()
+            if not r:
+                return api_error('API Key not found', code=404)
+            return api_success({
+                'id': r['id'],
+                'name': r['name'],
+                'provider': r['provider'],
+                'api_key': r['api_key'],
+                'description': r.get('description', ''),
+                'is_active': bool(r['is_active']),
+                'created_at': r['created_at'].isoformat() if r.get('created_at') else None,
+                'updated_at': r['updated_at'].isoformat() if r.get('updated_at') else None,
+            })
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        logger.error(f"get_api_key error: {e}")
+        return api_error(str(e), code=500)
+
+
+@app.route('/api/v1/management/system/api-keys/update', methods=['POST'])
+def update_api_key():
+    """修改 API Key 值"""
+    try:
+        data = request.get_json(force=True) or {}
+        key_id = data.get('id')
+        new_key = data.get('api_key')
+        if not key_id or not new_key:
+            return api_error('id and api_key are required', code=400)
+        conn, cur = _config_cursor()
+        try:
+            cur.execute("SELECT id FROM api_credentials WHERE id=%s", (key_id,))
+            if not cur.fetchone():
+                return api_error('API Key not found', code=404)
+            cur.execute(
+                "UPDATE api_credentials SET api_key=%s, updated_at=NOW() WHERE id=%s",
+                (new_key, key_id),
+            )
+            conn.commit()
+            return api_success({'id': key_id}, message='API Key updated successfully')
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        logger.error(f"update_api_key error: {e}")
+        return api_error(str(e), code=500)
+
+
+@app.route('/api/v1/management/system/api-keys/toggle', methods=['POST'])
+def toggle_api_key():
+    """启用/禁用 API Key"""
+    try:
+        data = request.get_json(force=True) or {}
+        key_id = data.get('id')
+        if not key_id:
+            return api_error('id is required', code=400)
+        conn, cur = _config_cursor()
+        try:
+            cur.execute("SELECT id, is_active FROM api_credentials WHERE id=%s", (key_id,))
+            r = cur.fetchone()
+            if not r:
+                return api_error('API Key not found', code=404)
+            new_status = 0 if r['is_active'] else 1
+            cur.execute(
+                "UPDATE api_credentials SET is_active=%s, updated_at=NOW() WHERE id=%s",
+                (new_status, key_id),
+            )
+            conn.commit()
+            return api_success({'id': key_id, 'is_active': bool(new_status)})
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        logger.error(f"toggle_api_key error: {e}")
+        return api_error(str(e), code=500)
+
+
 # ═══ 数据库密码获取 ═══
 def _get_mysql_pass():
     try:
