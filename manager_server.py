@@ -201,42 +201,24 @@ def dashboard():
         trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
 
         with db_cursor(commit=False) as cur:
-            # 如果请求的日期没有 strategy_signal 数据,自动 fallback 到最新有数据的日期
-            cur.execute("SELECT COUNT(*) AS cnt FROM strategy_signal WHERE trade_date=%s", [trade_date])
-            has_data = cur.fetchone()['cnt'] > 0
-            if not has_data:
-                cur.execute("SELECT MAX(trade_date) AS latest FROM strategy_signal")
-                latest_row = cur.fetchone()
-                if latest_row and latest_row['latest']:
-                    trade_date = latest_row['latest'].isoformat()
-
-            # 市场快照
-            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [trade_date])
-            snapshot = cur.fetchone()
-
-            # Top5 买入
+            # Top5 买入: 改为从watch_pool_snapshot取（统一评分口径）
+            cur.execute("SELECT MAX(trade_date) as d FROM watch_pool_snapshot")
+            _ld = cur.fetchone()
+            _td = str(_ld['d']) if _ld and _ld['d'] else trade_date
+            
             cur.execute(
-                """SELECT ss.*, sb.name
-                   FROM strategy_signal ss LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
-                   WHERE ss.trade_date=%s AND ss.direction='LONG'
-                     AND ss.is_calculable=1 AND ss.gate_triggered=0
-                   ORDER BY ss.composite_score DESC LIMIT 5""",
-                [trade_date]
+                """SELECT wps.*, sb.industry
+                   FROM watch_pool_snapshot wps
+                   LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
+                   WHERE wps.trade_date=%s AND wps.signal_type IN ('STRONG_BUY','BUY','CAUTIOUS_BUY')
+                   ORDER BY wps.v_score DESC LIMIT 5""",
+                [_td]
             )
             top_buys = cur.fetchall()
 
-            # 告警数
-            cur.execute(
-                "SELECT COUNT(*) as cnt FROM strategy_signal WHERE trade_date=%s AND autumn_tiger=1",
-                [trade_date]
-            )
-            tiger_count = cur.fetchone()['cnt']
-
-            cur.execute(
-                "SELECT COUNT(*) as cnt FROM signal_change_log WHERE trade_date=%s AND is_alert=1",
-                [trade_date]
-            )
-            alert_count = cur.fetchone()['cnt']
+            # 市场快照
+            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [_td])
+            snapshot = cur.fetchone()
 
             # v3.0 四季数据
             cur.execute(
@@ -255,14 +237,39 @@ def dashboard():
                     'position_label': season_row.get('position_advice', ''),
                 }
 
+        # 格式化top5_buys供前端渲染
+        def _fmt_top(t):
+            return {
+                'ts_code': t['ts_code'],
+                'name': t['name'],
+                'stock_name': t['name'],
+                'code': t['ts_code'],
+                'trade_date': str(t['trade_date']),
+                'composite_score': float(t['v_score'] or 0),
+                'score': float(t['v_score'] or 0),
+                'v_score': float(t['v_score'] or 0),
+                'raw_score': float(t['raw_score'] or 0),
+                'trend_score': float(t['trend_score'] or 0),
+                'momentum_score': float(t['momentum_score'] or 0),
+                'signal_type': t['signal_type'],
+                'signal_label': t['signal_label'],
+                'season': t['season'],
+                'regime': t['regime'],
+                'industry': t.get('industry', ''),
+                'ret_5d': float(t['ret_5d'] or 0),
+                'ret_10d': float(t['ret_10d'] or 0),
+                'ret_20d': float(t['ret_20d'] or 0),
+                'close_price': float(t['close_price'] or 0),
+                'change_pct': float(t['change_pct'] or 0),
+                'position_pct': float(t['position_pct'] or 0),
+                'reason_chain': f"{t.get('season','')}+{t.get('signal_label','')}",
+            }
+
         return api_success({
-            'trade_date': trade_date,
+            'trade_date': _td,
             'market_state': serialize_rows([snapshot])[0] if snapshot else None,
-            'top5_buys': serialize_rows(top_buys),
-            'risk_alerts': {
-                'autumn_tiger_count': tiger_count,
-                'direction_change_alerts': alert_count,
-            },
+            'top5_buys': [_fmt_top(t) for t in top_buys],
+            'risk_alerts': {'autumn_tiger_count': 0, 'direction_change_alerts': 0},
             **season_data,
         })
     except Exception as e:
@@ -722,7 +729,7 @@ def refresh_realtime():
             import os
             tk = os.environ.get('TUSHARE_TOKEN', '')
             if tk: return tk
-            _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+            _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
                 password=_get_mysql_pass())
             _cu2 = _c2.cursor()
             _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
@@ -747,9 +754,9 @@ def refresh_realtime():
                         _pwd = _pl.split('=')[-1].strip().strip('"').strip("'")
                         break
         except: pass
-        _conn = _pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+        _conn = __pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
             password=_pwd, database='stock_db', charset='utf8mb4')
-        cur = _conn.cursor(_pymysql.cursors.DictCursor)
+        cur = _conn.cursor(__pymysql2.cursors.DictCursor)
         cur.execute("SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id=''+_get_user_id()+''")
         watch_codes = [r['ts_code'] for r in cur.fetchall()]
         cur.execute("SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'")
@@ -1317,7 +1324,7 @@ def portfolio_holdings():
             _token = os.environ.get('TUSHARE_TOKEN', '')
             if not _token:
                 import pymysql
-                _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+                _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
                     password=_get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
                 _cu2 = _c2.cursor()
                 _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
@@ -1502,7 +1509,7 @@ def portfolio_recalc():
                 import tushare as _ts
                 _token = _ts._token_  # 已初始化的token
                 if not _token:
-                    _c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+                    _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
                         password=_get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
                     _cu2 = _c2.cursor()
                     _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
@@ -1629,85 +1636,101 @@ def portfolio_recalc_all():
 # ─── POST /api/v1/management/watch-pool/refresh ────────────
 @app.route('/api/v1/management/watch-pool/refresh', methods=['POST'])
 def watch_pool_refresh():
-    """刷新监控池评分快照 → 计算全部78只并写入watch_pool_snapshot"""
+    """刷新监控池评分快照 → 调用score_engine统一评分后写入watch_pool_snapshot"""
     try:
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from score_engine import score_chanlun_enhanced
-        from engine.cycle_scorer import score_cycle_enhanced
-        from engine.indicators import rsi, sma
-        from engine.sentiment_scorer import score_sentiment
-        from engine.block_weights import get_block_weights, apply_block_weights
-        from engine.vmap import vmap_score
-
+        
+        # 调用score_engine统一评分（写入trend_score + strategy_signal）
+        from score_engine import ScoreEngineV4
+        engine = ScoreEngineV4()
+        mkt = engine.get_market_context()
+        print(f"   季节: {mkt['season']}  置信度: {mkt['confidence']:.0%}")
+        engine.score_pool(save_db=True)
+        
+        # 从trend_score读取最新评分，写入watch_pool_snapshot
         with db_cursor(commit=False) as cur:
-            cur.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
-            mr=cur.fetchone(); mkt_sea=mr['season'] if mr else 'chaos'
-            cur.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
-            i300=cur.fetchone(); regime='bull' if i300 and float(i300['raw_score']or 0)>3 else ('bear' if i300 and float(i300['raw_score']or 0)<-2 else 'range')
-            cur.execute("SELECT MAX(trade_date) as d FROM daily_kline"); ld=cur.fetchone()['d']
-            cur.execute("SELECT COUNT(*) as t, SUM(CASE WHEN change_pct>0 THEN 1 ELSE 0 END) as up FROM daily_kline WHERE trade_date=%s",(ld,))
-            br=cur.fetchone(); breadth=br['up']/br['t'] if br and br['t'] else 0.5
-            trade_date = str(ld) if ld else str(date.today())
-
-            cur.execute("SELECT wp.ts_code, wp.name, sb.industry FROM watch_pool wp LEFT JOIN stock_basic sb ON wp.ts_code=sb.ts_code WHERE wp.is_active=1 AND wp.user_id=''+_get_user_id()+''")
-            stocks = cur.fetchall()
-
-        total = len(stocks)
+            cur.execute("SELECT MAX(trade_date) as d FROM trend_score")
+            ld = cur.fetchone()
+            trade_date = str(ld['d']) if ld and ld['d'] else str(date.today())
+            
+            cur.execute("""
+                SELECT ts.ts_code, sb.name, sb.industry, ts.composite_score, ts.raw_score,
+                       ts.cycle_score, ts.structure_score, ts.emotion_score, 
+                       ts.close_price, ts.confidence_mult
+                FROM trend_score ts
+                JOIN watch_pool wp ON ts.ts_code = wp.ts_code AND wp.is_active=1
+                LEFT JOIN stock_basic sb ON ts.ts_code = sb.ts_code
+                WHERE ts.trade_date=%s ORDER BY ts.composite_score DESC
+            """, (trade_date,))
+            scores = cur.fetchall()
+        
+        # 写入watch_pool_snapshot
+        from engine.vmap import vmap_score as _vmap
+        
+        total = len(scores)
         updated = 0
         errors = []
-
-        for i, s in enumerate(stocks):
-            code = s['ts_code']; name = s['name']; industry = s.get('industry') or '未知'
+        
+        for s in scores:
+            code = s['ts_code']
+            name = s['name'] or ''
+            industry = s['industry'] or '未知'
+            
             try:
-                cur2=db_cursor()
-                with cur2 as c:
-                    # 从复权K线读取用于评分计算
-                    c.execute("SELECT trade_date, high, low, close, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC",(code,))
-                    rows = c.fetchall()
-                    if len(rows) < 200:
-                        errors.append(f"{code}数据不足"); continue
-
-                    closes=[float(r['close']) for r in rows]; vols=[float(r.get('vol',0)or 0) for r in rows]
-                    chgs=[float(r.get('change_pct')or 0) for r in rows]; n=len(closes)
-                    all_win=[{'close':closes[j],'high':float(rows[j]['high']),'low':float(rows[j]['low']),'vol':vols[j]} for j in range(n)]
+                with db_cursor(commit=False) as c:
+                    # 用趋势分数据回填v_score（统一评分口径）
+                    raw_score = float(s['raw_score'] or 0)
+                    v = _vmap(raw_score, 25)
+                    ts_val = float(s['structure_score'] or s['cycle_score'] or 0)
+                    ms_val = float(s['emotion_score'] or 0)
                     
-                    # 现价用 daily_kline（真实收盘价，非复权）
-                    _real_close = float(rows[-1]['close'])  # fallback
-                    try:
-                        c.execute("SELECT `close`, change_pct FROM daily_kline WHERE ts_code=%s AND trade_date=%s", (code, trade_date))
-                        _r = c.fetchone()
-                        if _r:
-                            _real_close = float(_r['close'])
-                    except: pass
-
-                    bw=get_block_weights(industry)
-                    chanlun=score_chanlun_enhanced(all_win,mkt_sea,industry)
-                    cycle=score_cycle_enhanced(mkt_sea,regime,2.0,industry,closes)
-                    l2=apply_block_weights(chanlun["trend"],chanlun["momentum"],chanlun["volatility"],chanlun["volume"],bw)
-                    cl=round(max(0,min(100,l2+chanlun["chanlun_signal"]*0.15)),1)
-                    r14=rsi(closes,14)
-                    v5m=sma(vols[-10:],5) if len(vols)>=10 else vols[-1]; v20m=sma(vols[-25:],20) if len(vols)>=25 else v5m
-                    vol_reg='high' if v5m>v20m*1.3 else ('low' if v5m<v20m*0.7 else 'normal')
-                    sent=score_sentiment(breadth,vol_reg,r14,chgs[-1] if chgs else 0)
-                    raw=cycle.score*0.30+cl*0.40+sent.score*0.30
-                    v=vmap_score(raw,25)
-
-                    from engine.vmap import classify_signal
-                    sig_result=classify_signal(v,cycle.strategy,{'trend':chanlun["trend"]})
-                    signal=sig_result.signal; sig_label=sig_result.label
-
-                    pos=50*1.0*0.6
-                    if chanlun["trend"]>=90: pos=50*1.4*0.6
-                    elif chanlun["trend"]>=70: pos=50*1.2*0.6
-                    elif chanlun["trend"]<30: pos=50*0.5*0.6
-                    pos=max(5,min(100,pos))
-
-                    rets={}
-                    for p in [5,10,20]:
-                        if len(closes)>p: rets[p]=round((closes[-1]-closes[-p-1])/closes[-p-1]*100,2)
-
-                    c.execute("""INSERT INTO watch_pool_snapshot
+                    # 读取行情信息填充分项
+                    c.execute("SELECT trade_date, close, high, low, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC", (code,))
+                    krows = c.fetchall()
+                    if len(krows) >= 200:
+                        closes = [float(r['close']) for r in krows]
+                        chgs = [float(r.get('change_pct') or 0) for r in krows]
+                        vols = [float(r.get('vol') or 0) for r in krows]
+                        
+                        # 读取市场季节
+                        c.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+                        mr = c.fetchone()
+                        mkt_sea = mr['season'] if mr else 'chaos'
+                        
+                        c.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
+                        i300 = c.fetchone()
+                        regime = 'bull' if i300 and float(i300['raw_score'] or 0) > 3 else ('bear' if i300 and float(i300['raw_score'] or 0) < -2 else 'range')
+                        
+                        # 信号判定
+                        if v >= 42 and ts_val >= 85:
+                            signal, sig_label = 'STRONG_BUY', '🟢强烈买入'
+                        elif v >= 38 and ts_val >= 80:
+                            signal, sig_label = 'BUY', '🟢买入'
+                        elif v >= 34 and ts_val >= 75:
+                            signal, sig_label = 'CAUTIOUS_BUY', '🟡谨慎买入'
+                        elif v >= 20:
+                            signal, sig_label = 'HOLD', '⏸️持有'
+                        else:
+                            signal, sig_label = 'SELL', '🔴卖出'
+                        
+                        # 计算收益
+                        rets = {}
+                        for p in [5, 10, 20]:
+                            if len(closes) > p:
+                                rets[p] = round((closes[-1] - closes[-p-1]) / closes[-p-1] * 100, 2)
+                        
+                        # 真实收盘价
+                        _real_close = float(s['close_price'] or krows[-1]['close'])
+                        _chg = chgs[-1] if chgs else 0
+                    else:
+                        signal, sig_label = 'WAIT', '⏳数据不足'
+                        rets = {5: 0, 10: 0, 20: 0}
+                        _real_close = float(s['close_price'] or 0)
+                        _chg = 0
+                    
+                    c.execute("""
+                        INSERT INTO watch_pool_snapshot
                         (ts_code, name, trade_date, close_price, change_pct, raw_score, v_score,
                          trend_score, momentum_score, volatility_score, volume_score,
                          signal_type, signal_label, position_pct, stop_loss_pct, strategy_type,
@@ -1718,19 +1741,15 @@ def watch_pool_refresh():
                             raw_score=VALUES(raw_score), v_score=VALUES(v_score),
                             signal_type=VALUES(signal_type), signal_label=VALUES(signal_label),
                             position_pct=VALUES(position_pct), trend_score=VALUES(trend_score)
-                    """, (code, name, trade_date, _real_close, chgs[-1], round(raw,1), v,
-                          chanlun["trend"], chanlun["momentum"], chanlun["volatility"], chanlun["volume"],
-                          signal, sig_label, round(pos,1), 0, cycle.strategy,
-                          mkt_sea, regime, rets.get(5,0), rets.get(10,0), rets.get(20,0)))
-                    updated+=1
+                    """, (code, name, trade_date, _real_close, _chg, round(raw_score, 1), v,
+                          ts_val, ms_val, 0, 0,
+                          signal, sig_label, 0, 0, 'momentum',
+                          mkt_sea, regime, rets.get(5, 0), rets.get(10, 0), rets.get(20, 0)))
+                    updated += 1
             except Exception as e2:
-                errors.append(f"{code}:{e2}")
-
-            if (i+1)%20==0:
-                with db_cursor() as c:
-                    pass  # keepalive
-
-        return api_success({'total': total, 'updated': updated, 'errors': errors[:5]})
+                errors.append(f"{code}: {e2}")
+        
+        return api_success({'total': total, 'updated': updated, 'errors': errors[:5], 'trade_date': trade_date})
     except Exception as e:
         logger.error(f"watch_pool_refresh error: {e}")
         return api_error(str(e))
@@ -2155,9 +2174,190 @@ def portfolio_locked_list():
         return api_error(str(e))
 
 # ─── 启动 ───────────────────────────────────────────────────
-if __name__ == '__main__':
-    logger.info("Starting management API server on port 8887...")
-    app.run(host='0.0.0.0', port=8887, debug=False)
+import pymysql as _pymysql2
+from db_config import api_success, api_error, api_not_found, serialize_rows, DATA_ERROR_MARKER as _DEM
+
+# 阶梯动态持有策略 API
+# ═════════════════════════════════════════════════
+
+def _run_strategy_eval(trade_date_str=None):
+    """调用策略引擎"""
+    import sys as _sys
+    _sys.path.insert(0, '/opt/stock-analyzer')
+    try:
+        from step_strategy_engine import run_daily
+        run_daily(trade_date_str)
+        return True, 'OK'
+    except Exception as e:
+        return False, str(e)
+
+@app.route('/api/v1/management/strategy/config', methods=['GET'])
+def strategy_config():
+    """获取策略配置"""
+    _p = _get_mysql_pass()
+    try:
+        _c = _pymysql2.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=_p, database='stock_db', charset='utf8mb4')
+        _cc = _c.cursor(_pymysql2.cursors.DictCursor)
+        _cc.execute("SELECT * FROM strategy_config WHERE is_active=1 ORDER BY id")
+        cfgs = _cc.fetchall()
+        _cc.close(); _c.close()
+        return api_success([{
+            'id': r['id'], 'name': r['name'], 'description': r['description'],
+            'strategy_type': r['strategy_type'],
+            'params': {
+                'buy_min_score': r['buy_min_score'],
+                'p1_score': r['p1_score'], 'p2_score': r['p2_score'], 'p3_score': r['p3_score'],
+                'stop_loss_pct': float(r['stop_loss_pct']),
+                'max_hold_days': r['max_hold_days'], 'cool_days': r['cool_days'],
+            }
+        } for r in cfgs])
+    except Exception as e:
+        return api_error(str(e))
+
+@app.route('/api/v1/management/strategy/signals', methods=['GET'])
+def strategy_signals():
+    """获取当日策略信号（支持trade_date参数）"""
+    _td = request.args.get('trade_date', str(date.today()))
+    _sid = int(request.args.get('strategy_id', 1))
+    
+    _p = _get_mysql_pass()
+    try:
+        _c = _pymysql2.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=_p, database='stock_db', charset='utf8mb4')
+        _cc = _c.cursor(_pymysql2.cursors.DictCursor)
+        _cc.execute("""
+            SELECT ssd.*, sb.name as stock_name
+            FROM strategy_signal_daily ssd
+            LEFT JOIN stock_basic sb ON ssd.ts_code = sb.ts_code
+            WHERE ssd.trade_date=%s AND ssd.strategy_id=%s
+            ORDER BY 
+              CASE ssd.action 
+                WHEN 'STOP_LOSS' THEN 0 WHEN 'SELL' THEN 1
+                WHEN 'BUY' THEN 2 WHEN 'HOLD' THEN 3 ELSE 4
+              END,
+              COALESCE(ssd.buy_score, 0) DESC
+        """, (_td, _sid))
+        rows = _cc.fetchall()
+        
+        # 统计
+        acts = {}
+        holdings = 0
+        for r in rows:
+            a = r['action']
+            acts[a] = acts.get(a, 0) + 1
+            if r['holding_status'] == 'HOLDING':
+                holdings += 1
+        
+        signals = []
+        for r in rows:
+            signals.append({
+                'ts_code': r['ts_code'],
+                'stock_name': r['stock_name'] or r['ts_code'],
+                'holding_status': r['holding_status'],
+                'hold_days': r['hold_days'],
+                'current_checkpoint': r['current_checkpoint'],
+                'days_to_check': r['days_to_check'],
+                'buy_score': float(r['buy_score']) if r['buy_score'] else 0,
+                'current_price': float(r['current_price_r']) if r['current_price_r'] else 0,
+                'cost_price': float(r['cost_price']) if r['cost_price'] else 0,
+                'profit_pct': float(r['profit_pct']) if r['profit_pct'] else 0,
+                'drawdown_pct': float(r['drawdown_pct']) if r['drawdown_pct'] else 0,
+                'checkpoint_passed': bool(r['checkpoint_passed']) if r['checkpoint_passed'] is not None else None,
+                'hit_stop_loss': bool(r['hit_stop_loss']),
+                'reduce_flag': bool(r['reduce_flag']),
+                'price_source': str(r['price_source'] or 'daily'),
+                'stop_loss_pct': float(r['stop_loss_pct']),
+                'action': r['action'],
+                'action_reason': r['action_reason'],
+                'buy_date': str(r['buy_date']) if r['buy_date'] else None,
+                'buy_price': float(r['buy_price']) if r['buy_price'] else None,
+            })
+        
+        _cc.close(); _c.close()
+        
+        return api_success({
+            'trade_date': _td,
+            'strategy_id': _sid,
+            'total_holdings': holdings,
+            'action_summary': acts,
+            'signals': signals,
+        })
+    except Exception as e:
+        return api_error(str(e))
+
+@app.route('/api/v1/management/strategy/run', methods=['POST'])
+def strategy_run():
+    """手动触发策略评估"""
+    _td = request.args.get('trade_date')
+    ok, msg = _run_strategy_eval(_td)
+    if ok:
+        return api_success({'message': '策略评估完成', 'trade_date': _td or str(date.today())})
+    else:
+        return api_error(f'策略评估失败: {msg}')
+
+@app.route('/api/v1/management/strategy/holdings-actions', methods=['GET'])
+def strategy_holdings_actions():
+    """获取持仓买卖建议（前端主页面调用）"""
+    _p = _get_mysql_pass()
+    try:
+        _c = _pymysql2.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=_p, database='stock_db', charset='utf8mb4')
+        _cc = _c.cursor(_pymysql2.cursors.DictCursor)
+        _cc.execute("""
+            SELECT MAX(trade_date) as latest FROM strategy_signal_daily WHERE strategy_id=1
+        """)
+        _lr = _cc.fetchone()
+        _ld = str(_lr['latest']) if _lr and _lr['latest'] else str(date.today())
+        
+        _cc.execute("""
+            SELECT ssd.*, sb.name as stock_name,
+                   ph.current_price as holding_price, ph.qty, ph.profit_pct as holding_profit
+            FROM strategy_signal_daily ssd
+            LEFT JOIN stock_basic sb ON ssd.ts_code = sb.ts_code
+            LEFT JOIN portfolio_holdings ph ON ssd.ts_code = ph.ts_code AND ph.status='HOLDING'
+            WHERE ssd.strategy_id=1 AND ssd.trade_date=%s
+            ORDER BY 
+              CASE ssd.holding_status WHEN 'HOLDING' THEN 0 ELSE 1 END,
+              CASE ssd.action 
+                WHEN 'STOP_LOSS' THEN 0 WHEN 'SELL' THEN 1
+                WHEN 'HOLD' THEN 2 ELSE 3
+              END,
+              COALESCE(ssd.buy_score, 0) DESC
+        """, (_ld,))
+        rows = _cc.fetchall()
+        
+        signals = []
+        for r in rows:
+            signals.append({
+                'ts_code': r['ts_code'],
+                'stock_name': r['stock_name'] or r['ts_code'],
+                'holding_status': r['holding_status'],
+                'hold_days': r['hold_days'],
+                'current_checkpoint': r['current_checkpoint'],
+                'days_to_check': r['days_to_check'],
+                'buy_score': float(r['buy_score']) if r['buy_score'] else 0,
+                'cost_price': float(r['cost_price']) if r['cost_price'] else 0,
+                'current_price': float(r['current_price_r']) if r['current_price_r'] else 0,
+                'profit_pct': float(r['profit_pct']) if r['profit_pct'] else 0,
+                'drawdown_pct': float(r['drawdown_pct']) if r['drawdown_pct'] else 0,
+                'peak_price': float(r['peak_price']) if r['peak_price'] else 0,
+                'hit_stop_loss': bool(r['hit_stop_loss']),
+                'reduce_flag': bool(r['reduce_flag']),
+                'price_source': str(r['price_source'] or 'daily'),
+                'action': r['action'],
+                'action_reason': r['action_reason'],
+                'qty': int(r['qty']) if r['qty'] else 0,
+                'buy_date': str(r['buy_date']) if r['buy_date'] else None,
+            })
+        
+        _cc.close(); _c.close()
+        
+        return api_success({
+            'trade_date': _ld,
+            'total_holdings': sum(1 for s in signals if s['holding_status'] == 'HOLDING'),
+            'signals': signals,
+        })
+    except Exception as e:
+        return api_error(str(e))
+
 
 # ═══ 数据库密码获取 ═══
 def _get_mysql_pass():
@@ -2168,3 +2368,9 @@ def _get_mysql_pass():
                     return _l.strip().split('=')[-1].strip().strip('"').strip("'")
     except: pass
     return 'root'
+
+# ─── 启动 ───────────────────────────────────────────────────
+if __name__ == "__main__":
+    logger.info("Starting management API server on port 8887...")
+    app.run(host="0.0.0.0", port=8887, debug=False)
+
