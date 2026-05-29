@@ -732,7 +732,7 @@ def refresh_realtime():
             _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
                 password=_get_mysql_pass(), database='stock_db', charset='utf8mb4')
             _cu2 = _c2.cursor()
-            _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+            _cu2.execute("SELECT api_key FROM openclaw_config.api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
             _r2 = _cu2.fetchone()
             _cu2.close(); _c2.close()
             return _r2[0] if _r2 else ''
@@ -1327,7 +1327,7 @@ def portfolio_holdings():
                 _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
                     password=_get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
                 _cu2 = _c2.cursor()
-                _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+                _cu2.execute("SELECT api_key FROM openclaw_config.api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
                 _r2 = _cu2.fetchone()
                 if _r2: _token = _r2[0]
                 _cu2.close(); _c2.close()
@@ -1512,7 +1512,7 @@ def portfolio_recalc():
                     _c2 = _pymysql2.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
                         password=_get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
                     _cu2 = _c2.cursor()
-                    _cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+                    _cu2.execute("SELECT api_key FROM openclaw_config.api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
                     _r2 = _cu2.fetchone()
                     if _r2:
                         _token = _r2[0]
@@ -1525,8 +1525,9 @@ def portfolio_recalc():
                         cp = float(_rt.iloc[-1]['close'])
             except:
                 pass
+            uid3 = _get_user_id()
             with cur2 as cur3:
-                cur3.execute("SELECT cost_price, qty FROM portfolio_holdings WHERE user_id=''+_get_user_id()+'' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",(ts_code,))
+                cur3.execute("SELECT cost_price, qty FROM portfolio_holdings WHERE user_id=%s AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",(uid3, ts_code))
                 hr=cur3.fetchone()
                 cost=float(hr['cost_price']) if hr and hr['cost_price'] else 1
                 qty=int(hr['qty']) if hr and hr['qty'] else 0
@@ -1535,9 +1536,9 @@ def portfolio_recalc():
                 cur3.execute("""
                     UPDATE portfolio_holdings SET current_price=%s, profit_amount=%s, profit_pct=%s,
                     advice=%s, advice_reason=%s, updated_at=NOW()
-                    WHERE user_id=''+_get_user_id()+'' AND ts_code=%s AND status='HOLDING'
+                    WHERE user_id=%s AND ts_code=%s AND status='HOLDING'
                     ORDER BY trade_date DESC LIMIT 1
-                """, (cp, profit_amt, profit_pct, advice, reason, ts_code))
+                """, (cp, profit_amt, profit_pct, advice, reason, uid3, ts_code))
 
             return api_success({'ts_code':ts_code,'v_score':v,'advice':advice,'reason':reason})
     except Exception as e:
@@ -1616,7 +1617,7 @@ def portfolio_recalc_all():
                     cost=float(h['cost_price'] or 1); qty=int(h['qty'] or 0)
                     profit_amt=round((cp-cost)*qty,2)
                     profit_pct=round((cp-cost)/cost*100,2) if cost>0 else 0
-                    c.execute("UPDATE portfolio_holdings SET current_price=%s,profit_amount=%s,profit_pct=%s,advice=%s,advice_reason=%s,updated_at=NOW() WHERE user_id=''+_get_user_id()+'' AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                    c.execute("UPDATE portfolio_holdings SET current_price=%s,profit_amount=%s,profit_pct=%s,advice=%s,advice_reason=%s,updated_at=NOW() WHERE user_id=%s AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
                               (cp,profit_amt,profit_pct,advice,reason,code))
                     updated+=1
             except Exception as _re:
@@ -1808,7 +1809,7 @@ def watch_pool_snapshot():
 def watch_pool_list():
     user_id = request.args.get('user_id', 'tony')
     with db_cursor(commit=False) as cur:
-        cur.execute("SELECT wp.* FROM watch_pool wp WHERE wp.user_id=%s AND wp.is_active=1 ORDER BY wp.sort_order, wp.created_at", (user_id,))
+        cur.execute("SELECT wp.* FROM watch_pool wp WHERE wp.user_id=%(uid_arg)s AND wp.is_active=1 ORDER BY wp.sort_order, wp.created_at", (user_id,))
         return api_success({'list': serialize_rows(cur.fetchall())})
 
 @app.route('/api/v1/management/watch-pool/add', methods=['POST'])
@@ -1817,28 +1818,31 @@ def watch_pool_add():
     ts_code = data.get('ts_code', '')
     if not ts_code: return api_error('缺少ts_code')
     with db_cursor() as cur:
-        cur.execute("INSERT INTO watch_pool (user_id, ts_code, name) VALUES (''+_get_user_id()+'', %s, %s) ON DUPLICATE KEY UPDATE is_active=1", (ts_code, data.get('name', '')))
+        uid_val = _get_user_id()
+        cur.execute("INSERT INTO watch_pool (user_id, ts_code, name) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE is_active=1", (uid_val, ts_code, data.get('name', '')))
     return api_success({'ts_code': ts_code})
 
 @app.route('/api/v1/management/watch-pool/remove', methods=['POST'])
 def watch_pool_remove():
     data = request.get_json()
     with db_cursor() as cur:
-        cur.execute("UPDATE watch_pool SET is_active=0 WHERE user_id=''+_get_user_id()+'' AND ts_code=%s", (data.get('ts_code', '')))
+        uid_val = _get_user_id()
+        cur.execute("UPDATE watch_pool SET is_active=0 WHERE user_id=%s AND ts_code=%s", (uid_val, data.get('ts_code', '')))
     return api_success({})
 
 @app.route('/api/v1/management/portfolio/watch-list', methods=['GET'])
 def portfolio_watch_list():
     with db_cursor(commit=False) as cur:
+        uid4 = _get_user_id()
         cur.execute("""
             SELECT wp.ts_code, wp.name, wp.sort_order,
                    dk.close, dk.change_pct, dk.vol
             FROM watch_pool wp
             LEFT JOIN daily_kline dk ON wp.ts_code = dk.ts_code
                 AND dk.trade_date = (SELECT MAX(trade_date) FROM daily_kline)
-            WHERE wp.user_id=''+_get_user_id()+'' AND wp.is_active=1
+            WHERE wp.user_id=%s AND wp.is_active=1
             ORDER BY wp.sort_order
-        """)
+        """, (uid4,))
         return api_success({'list': serialize_rows(cur.fetchall())})
 
 
@@ -2137,14 +2141,15 @@ def portfolio_unlock():
 def portfolio_locked_list():
     """锁仓列表"""
     try:
+        uid5 = _get_user_id()
         with db_cursor(commit=False) as cur:
             cur.execute("""
                 SELECT ts_code, name, trade_date, qty, cost_price, current_price,
                        market_value, profit_amount, profit_pct, lock_until
                 FROM portfolio_holdings 
-                WHERE user_id=''+_get_user_id()+'' AND status='HOLDING' AND lock_until IS NOT NULL
+                WHERE user_id=%s AND status='HOLDING' AND lock_until IS NOT NULL
                 ORDER BY lock_until ASC
-            """)
+            """, (uid5,))
             rows = cur.fetchall()
             locked = []
             from datetime import date
