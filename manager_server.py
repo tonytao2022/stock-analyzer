@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import logging
+import subprocess
 from datetime import datetime, date, timedelta
 from flask import Flask, request
 
@@ -2195,6 +2196,155 @@ def portfolio_locked_list():
         logger.error(f"portfolio_locked_list error: {e}")
         return api_error(str(e))
 
+# ─── GET /api/v1/management/system/cron-status ─────────────
+@app.route('/api/v1/management/system/cron-status', methods=['GET'])
+def cron_status():
+    """Cron定时任务执行状态监控"""
+    now = datetime.now()
+    results = []
+
+    def _file_mtime(path):
+        try:
+            ts = os.path.getmtime(path)
+            return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), ts
+        except:
+            return None, 0
+
+    # 1. daily_pipeline 数据管道
+    pl_path = '/tmp/daily_pipeline_cron_out.log'
+    pl_mtime_str, pl_mtime_ts = _file_mtime(pl_path)
+    hours_ago = (now.timestamp() - pl_mtime_ts) / 3600 if pl_mtime_ts > 0 else 999
+    if not pl_mtime_str:
+        pl_status = 'not_run'
+        pl_label = '⏳ 未运行'
+    elif hours_ago < 24:
+        pl_status = 'ok'
+        pl_label = '✅ 正常'
+    elif hours_ago < 48:
+        pl_status = 'warn'
+        pl_label = '⚠️ 延迟'
+    else:
+        pl_status = 'error'
+        pl_label = '❌ 异常'
+    results.append({
+        'id': 'daily_pipeline',
+        'name': '📊 数据管道',
+        'description': '行情获取→缠论→评分→监控池',
+        'last_run': pl_mtime_str or '从未执行',
+        'hours_ago': round(hours_ago, 1),
+        'status': pl_status,
+        'status_label': pl_label,
+        'log_file': pl_path,
+    })
+
+    # 2. strategy_eval 策略评估
+    se_path = '/tmp/strategy_daily.log'
+    se_mtime_str, se_mtime_ts = _file_mtime(se_path)
+    hours_ago = (now.timestamp() - se_mtime_ts) / 3600 if se_mtime_ts > 0 else 999
+    if not se_mtime_str:
+        se_status = 'not_run'
+        se_label = '⏳ 未运行'
+    elif hours_ago < 24:
+        se_status = 'ok'
+        se_label = '✅ 正常'
+    elif hours_ago < 48:
+        se_status = 'warn'
+        se_label = '⚠️ 延迟'
+    else:
+        se_status = 'error'
+        se_label = '❌ 异常'
+    results.append({
+        'id': 'strategy_eval',
+        'name': '📈 策略评估',
+        'description': '阶梯动态持有策略每日评估',
+        'last_run': se_mtime_str or '从未执行',
+        'hours_ago': round(hours_ago, 1),
+        'status': se_status,
+        'status_label': se_label,
+        'log_file': se_path,
+    })
+
+    # 3. 各stock-manager服务状态
+    services = [
+        ('stock-manager-8887', '管理API (8887)'),
+        ('stock-manager-8888', '趋势评分API (8888)'),
+        ('stock-manager-8889', '信号API (8889)'),
+    ]
+    for svc_name, svc_label in services:
+        try:
+            r = subprocess.run(['systemctl', 'is-active', svc_name], capture_output=True, text=True, timeout=5)
+            active = r.stdout.strip() == 'active'
+            results.append({
+                'id': f'service_{svc_name}',
+                'name': f'🔧 {svc_label}',
+                'description': f'服务状态',
+                'last_run': None,
+                'hours_ago': None,
+                'status': 'ok' if active else 'error',
+                'status_label': '✅ 运行中' if active else '❌ 已停止',
+                'service_name': svc_name,
+            })
+        except Exception as e:
+            results.append({
+                'id': f'service_{svc_name}',
+                'name': f'🔧 {svc_label}',
+                'description': f'服务状态',
+                'last_run': None,
+                'hours_ago': None,
+                'status': 'error',
+                'status_label': f'❌ 检查失败: {e}',
+                'service_name': svc_name,
+            })
+
+    # 4. 磁盘使用率
+    try:
+        r = subprocess.run(['df', '-h', '/'], capture_output=True, text=True, timeout=5)
+        lines = r.stdout.strip().split('\n')
+        df_info = {}
+        if len(lines) >= 2:
+            parts = lines[1].split()
+            df_info = {
+                'filesystem': parts[0],
+                'size': parts[1],
+                'used': parts[2],
+                'avail': parts[3],
+                'use_pct': parts[4],
+                'mounted': parts[5],
+            }
+        use_val = int(df_info.get('use_pct', '0%').replace('%', ''))
+        results.append({
+            'id': 'disk_usage',
+            'name': '💾 磁盘使用率',
+            'description': '系统盘(/dev/vda2)',
+            'last_run': None,
+            'hours_ago': None,
+            'status': 'ok' if use_val < 80 else ('warn' if use_val < 90 else 'error'),
+            'status_label': f"{'✅' if use_val < 80 else '⚠️' if use_val < 90 else '❌'} {use_val}%",
+            'disk_info': df_info,
+        })
+    except Exception as e:
+        results.append({
+            'id': 'disk_usage',
+            'name': '💾 磁盘使用率',
+            'description': '系统盘',
+            'last_run': None,
+            'hours_ago': None,
+            'status': 'error',
+            'status_label': f'❌ 检查失败',
+            'disk_info': {},
+        })
+
+    return api_success({
+        'server_time': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'items': results,
+        'total': len(results),
+        'ok_count': sum(1 for r in results if r['status'] == 'ok'),
+        'warn_count': sum(1 for r in results if r['status'] == 'warn'),
+        'error_count': sum(1 for r in results if r['status'] == 'error'),
+        'not_run_count': sum(1 for r in results if r['status'] == 'not_run'),
+    })
+
+
 # ─── 启动 ───────────────────────────────────────────────────
 import pymysql as _pymysql2
 from db_config import api_success, api_error, api_not_found, serialize_rows, DATA_ERROR_MARKER as _DEM
@@ -2482,6 +2632,224 @@ def strategy_holdings_actions():
         })
     except Exception as e:
         return api_error(str(e))
+
+
+# ─── POST /api/v1/management/portfolio/import-screenshot ────
+@app.route('/api/v1/management/portfolio/import-screenshot', methods=['POST'])
+def portfolio_import_screenshot():
+    """
+    上传持仓截图，OCR识别后返回解析结果。
+    请求：multipart/form-data，file=截图文件(PNG/JPG)
+    响应：{holdings: [{name, qty, current_price, cost_price, profit_amount, profit_pct}], raw_text: ...}
+    确认写入：POST /api/v1/management/portfolio/import-screenshot/confirm
+    """
+    import uuid
+    try:
+        if 'file' not in request.files:
+            return api_error("请上传截图文件")
+        
+        f = request.files['file']
+        if f.filename == '':
+            return api_error("文件名为空")
+        
+        # 保存到临时文件
+        tmp_dir = '/tmp/stock_screenshots'
+        os.makedirs(tmp_dir, exist_ok=True)
+        ext = os.path.splitext(f.filename)[1] or '.png'
+        tmp_path = os.path.join(tmp_dir, f"screenshot_{uuid.uuid4().hex}{ext}")
+        f.save(tmp_path)
+        
+        logger.info(f"截图保存到: {tmp_path}")
+        
+        # 调用OCR解析器
+        ocr_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screenshot_ocr_parser.py')
+        ocr_python = '/root/.openclaw/workspace/skills/ocr-python/venv/bin/python3'
+        
+        # 尝试使用PaddleOCR（如果环境可用），否则用系统python+tesseract
+        python_bin = sys.executable
+        
+        result = subprocess.run(
+            [python_bin, ocr_script, tmp_path],
+            capture_output=True, text=True, timeout=120
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"OCR解析失败: {result.stderr}")
+            return api_error(f"OCR解析失败: {result.stderr[:200]}")
+        
+        parsed = json.loads(result.stdout)
+        holdings = parsed.get('holdings', [])
+        
+        # 清理临时文件
+        try:
+            os.remove(tmp_path)
+        except:
+            pass
+        
+        return api_success({
+            'holdings': holdings,
+            'count': len(holdings),
+            'trade_date': datetime.now().strftime('%Y-%m-%d'),
+        })
+    except subprocess.TimeoutExpired:
+        logger.error("OCR解析超时")
+        return api_error("OCR解析超时，请重试")
+    except Exception as e:
+        logger.error(f"import_screenshot error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/portfolio/import-screenshot/confirm ─
+@app.route('/api/v1/management/portfolio/import-screenshot/confirm', methods=['POST'])
+def portfolio_import_screenshot_confirm():
+    """
+    确认导入截图解析结果到portfolio_holdings表
+    请求体: {holdings: [{name, qty, current_price, cost_price}], trade_date: "2026-05-29"}
+    """
+    try:
+        data = request.get_json() or {}
+        holdings = data.get('holdings', [])
+        trade_date = data.get('trade_date', datetime.now().strftime('%Y-%m-%d'))
+        user_id = _get_user_id()
+        
+        if not holdings:
+            return api_error("持仓数据为空")
+        
+        with db_cursor(commit=True) as cur:
+            inserted = 0
+            updated = 0
+            
+            for h in holdings:
+                name = h.get('name', '')
+                qty = int(h.get('qty', 0))
+                avail_qty = int(h.get('avail_qty', qty))
+                current_price = float(h.get('current_price', 0))
+                cost_price = float(h.get('cost_price', 0))
+                profit_amount = round((current_price - cost_price) * qty, 2) if qty > 0 else 0
+                profit_pct = round((current_price - cost_price) / cost_price * 100, 2) if cost_price > 0 and qty > 0 else 0
+                market_value = round(qty * current_price, 2)
+                status = 'HOLDING' if qty > 0 else 'SOLD'
+                
+                # 使用upsert：trade_date+ts_code确定唯一性
+                # 这里ts_code未知，用name做临时标识
+                # 先检查是否已有该名称的持仓
+                cur.execute(
+                    "SELECT ts_code, name FROM portfolio_holdings WHERE name=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                    (name,)
+                )
+                existing = cur.fetchone()
+                
+                ts_code = existing['ts_code'] if existing else f"OCR_{name}"
+                
+                if existing:
+                    # 更新现有持仓
+                    cur.execute(
+                        """UPDATE portfolio_holdings 
+                           SET qty=%s, avail_qty=%s, current_price=%s, cost_price=%s,
+                               market_value=%s, profit_amount=%s, profit_pct=%s, trade_date=%s,
+                               status=%s, user_id=%s, updated_at=NOW()
+                           WHERE ts_code=%s AND status='HOLDING'
+                           ORDER BY trade_date DESC LIMIT 1""",
+                        (qty, avail_qty, current_price, cost_price,
+                         market_value, profit_amount, profit_pct, trade_date,
+                         status, user_id, ts_code)
+                    )
+                    updated += 1
+                else:
+                    # 插入新持仓
+                    cur.execute(
+                        """INSERT INTO portfolio_holdings 
+                           (user_id, ts_code, name, trade_date, qty, avail_qty,
+                            current_price, cost_price, market_value,
+                            profit_amount, profit_pct, status, source, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OCR', NOW())""",
+                        (user_id, ts_code, name, trade_date, qty, avail_qty,
+                         current_price, cost_price, market_value,
+                         profit_amount, profit_pct, status)
+                    )
+                    inserted += 1
+            
+            # 更新账户资产（如果提供了总资产信息）
+            total_assets = data.get('total_assets')
+            if total_assets:
+                total_mv = sum(float(h.get('qty', 0)) * float(h.get('current_price', 0)) for h in holdings)
+                available_cash = float(total_assets) - total_mv
+                cur.execute(
+                    """INSERT INTO portfolio_account 
+                       (trade_date, total_assets, total_market_value, available_cash)
+                       VALUES (%s, %s, %s, %s)
+                       ON DUPLICATE KEY UPDATE
+                       total_assets=VALUES(total_assets),
+                       total_market_value=VALUES(total_market_value),
+                       available_cash=VALUES(available_cash)""",
+                    (trade_date, total_assets, round(total_mv, 2), round(available_cash, 2))
+                )
+        
+        return api_success({
+            'inserted': inserted,
+            'updated': updated,
+            'total': len(holdings),
+            'trade_date': trade_date,
+        })
+    except Exception as e:
+        logger.error(f"import_screenshot_confirm error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/backtest/run ────────────────────
+@app.route('/api/v1/management/backtest/run', methods=['POST'])
+def backtest_run():
+    """策略回测执行：调用/tmp/step_backtest_json.py进行多策略对比回测"""
+    import json as _json, subprocess, os, sys
+    try:
+        data = request.get_json() or {}
+        
+        # 提取参数（含默认值）
+        params = {
+            'min_buy_score': data.get('min_buy_score', 30),
+            'p1': data.get('p1', 10),
+            'p2': data.get('p2', 20),
+            'p3': data.get('p3', 30),
+            'stop_loss_pct': data.get('stop_loss_pct', 10),
+            'max_hold_days': data.get('max_hold_days', 60),
+            'start_date': data.get('start_date', ''),
+            'end_date': data.get('end_date', ''),
+        }
+        if data.get('force_hold'):
+            params['force_hold'] = data['force_hold']
+        
+        logger.info(f"回测请求参数: {_json.dumps(params, ensure_ascii=False)}")
+        
+        script_path = '/tmp/step_backtest_json.py'
+        if not os.path.exists(script_path):
+            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'step_backtest_json.py')
+        
+        r = subprocess.run(
+            [sys.executable, script_path, _json.dumps(params)],
+            capture_output=True, text=True, timeout=300, cwd='/tmp'
+        )
+        
+        if r.returncode != 0:
+            logger.error(f"回测脚本错误(stderr): {r.stderr[-500:]}")
+            return api_error(f"回测执行失败: {r.stderr[-200:]}", code=500)
+        
+        try:
+            result = _json.loads(r.stdout.strip())
+        except _json.JSONDecodeError as e:
+            logger.error(f"回测结果解析失败: {e}, stdout={r.stdout[:500]}")
+            return api_error(f"回测结果解析失败: {e}", code=500)
+        
+        if not result.get('success'):
+            return api_error(result.get('error', '回测执行返回错误'), code=500)
+        
+        logger.info(f"回测完成: {result.get('total_strategies', 0)}个策略")
+        return api_success(result)
+    except subprocess.TimeoutExpired:
+        logger.error("回测超时(300s)")
+        return api_error('回测超时，请减小时间范围', code=504)
+    except Exception as e:
+        logger.error(f"backtest_run error: {e}")
+        return api_error(str(e), code=500)
 
 
 # ═══ 数据库密码获取 ═══
