@@ -1849,6 +1849,7 @@ function showHoldingDialog(id, tsCode, name, tradeDate, buyDate, qty, costPrice,
   const d = new Date().toISOString().split('T')[0];
   
   const overlay = document.createElement('div');
+  overlay.id = 'holdingDialogOverlay';
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-lg);padding:24px;width:420px;max-width:90vw;max-height:90vh;overflow-y:auto">'
     + '<div style="font-size:16px;font-weight:600;color:var(--text-bright);margin-bottom:16px">' + title + '</div>'
@@ -1871,7 +1872,7 @@ function showHoldingDialog(id, tsCode, name, tradeDate, buyDate, qty, costPrice,
     + '<div id="hdlg_preview" style="padding:8px 12px;background:var(--bg-tooltip);border-radius:var(--radius);font-size:12px;margin-bottom:16px;color:var(--text-secondary)">填写数据后自动计算盈亏</div>'
     // 按钮
     + '<div style="display:flex;gap:10px;justify-content:flex-end">'
-    + '<button onclick="this.closest(\'[style*=\"z-index:9999\"]\').remove()" style="background:transparent;border:1px solid var(--border-color);color:var(--text-secondary);border-radius:var(--radius);padding:8px 20px;font-size:13px;cursor:pointer">取消</button>'
+    + '<button onclick="closeDialog()" style="background:transparent;border:1px solid var(--border-color);color:var(--text-secondary);border-radius:var(--radius);padding:8px 20px;font-size:13px;cursor:pointer">取消</button>'
     + '<button onclick="'+(isNew?'submitAddHolding()':'submitEditHolding('+id+')')+'" style="background:var(--color-hold);color:#fff;border:none;border-radius:var(--radius);padding:8px 20px;font-size:13px;cursor:pointer">'+(isNew?'✅ 确认新增':'✅ 保存修改')+'</button>'
     + '</div></div>';
   document.body.appendChild(overlay);
@@ -1943,8 +1944,8 @@ async function deleteHolding(id, tsCode) {
 }
 
 function closeDialog() {
-  const els = document.querySelectorAll('[style*="z-index:9999"]');
-  els.forEach(el => el.remove());
+  const el = document.getElementById('holdingDialogOverlay');
+  if (el) el.remove();
 }
 
 // ═══ 截图导入 ═══
