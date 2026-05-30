@@ -25,6 +25,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger('daily_pipeline')
 
+def get_mysql_pass():
+    """从 debian.cnf 读取 MySQL 密码"""
+    try:
+        with open('/etc/mysql/debian.cnf') as f:
+            for line in f:
+                if 'password' in line:
+                    return line.strip().split('=')[-1].strip().strip('"').strip("'")
+    except:
+        pass
+    return ''
+
 def run_step(name, func, *args, **kwargs):
     logger.info(f"{'='*50}")
     logger.info(f"🚀 [{name}] 开始...")
@@ -43,18 +54,12 @@ def step_kline():
     """Step 1: 拉取最新K线（批量优化版）"""
     import pymysql, tushare as ts
     
-    def get_pass():
-        with open('/etc/mysql/debian.cnf') as f2:
-            for l in f2:
-                if 'password' in l: return l.strip().split('=')[-1].strip().strip('"').strip("'")
-        return ''
-    
     def get_token():
         import os
         tk = os.environ.get('TUSHARE_TOKEN', '')
         if tk: return tk
         c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-            password=get_pass(),database='openclaw_config',charset='utf8mb4')
+            password=get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
         cu2 = c2.cursor()
         cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
         r2 = cu2.fetchone()
@@ -62,7 +67,7 @@ def step_kline():
         return r2[0] if r2 else ''
     
     conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-        password=get_pass(),database='stock_db',charset='utf8mb4')
+        password=get_mysql_pass(),database='stock_db',charset='utf8mb4')
     cur = conn.cursor(pymysql.cursors.DictCursor)
     
     # 获取股票列表
@@ -165,14 +170,30 @@ def step_score():
 def step_snapshot():
     """Step 5: 监控池快照 (通过API触发)"""
     import requests
+    import pymysql
     try:
-        r = requests.post('http://localhost:8887/api/v1/management/watch-pool/refresh', timeout=120)
+        # 读数据库中的api_key
+        conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
+            password=get_mysql_pass(),database='stock_db')
+        cur = conn.cursor()
+        cur.execute("SELECT config_value FROM system_config WHERE config_key='api_key' LIMIT 1")
+        row = cur.fetchone()
+        api_key = row[0] if row else ''
+        cur.close(); conn.close()
+        
+        headers = {'X-API-Key': api_key}
+        r = requests.post('http://localhost:8887/api/v1/management/watch-pool/refresh',
+                          headers=headers, timeout=120)
         if r.status_code == 200:
             data = r.json()
-            logger.info(f"📊 监控池快照: {data.get('data',{}).get('updated',0)}只更新")
-            return data.get('data',{})
+            if data.get('code') == 0:
+                logger.info(f"📊 监控池快照: {data.get('data',{}).get('updated',0)}只更新")
+                return data.get('data',{})
+            else:
+                logger.warning(f"⚠️ 监控池快照API返回错误: {data.get('error','')}")
+                return None
         else:
-            logger.warning(f"⚠️ 监控池快照HTTP {r.status_code}")
+            logger.warning(f"⚠️ 监控池快照HTTP {r.status_code}: {r.text[:200]}")
             return None
     except Exception as e:
         logger.error(f"❌ 监控池快照失败: {e}")
