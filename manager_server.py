@@ -2332,12 +2332,22 @@ def cron_status():
     ]
     for svc_name, svc_label in services:
         try:
+            # 先检查systemd服务
             r = subprocess.run(['systemctl', 'is-active', svc_name], capture_output=True, text=True, timeout=5)
-            active = r.stdout.strip() == 'active'
+            active_systemd = r.stdout.strip() == 'active'
+            # 再检查进程——port 8887用manager_server.py, 8888用signal, 8889用signal
+            port = svc_name.split('-')[-1]
+            if port == '8887':
+                proc_check = subprocess.run(['pgrep', '-f', 'manager_server.py'], capture_output=True, text=True, timeout=3)
+            else:
+                proc_check = subprocess.run(['pgrep', '-f', 'signal_server'], capture_output=True, text=True, timeout=3)
+            active_proc = proc_check.returncode == 0
+            
+            active = active_systemd or active_proc
             results.append({
                 'id': f'service_{svc_name}',
                 'name': f'🔧 {svc_label}',
-                'description': f'服务状态',
+                'description': f'服务状态' + ('(系统服务)' if active_systemd else '(进程运行中)'),
                 'last_run': None,
                 'hours_ago': None,
                 'status': 'ok' if active else 'error',
