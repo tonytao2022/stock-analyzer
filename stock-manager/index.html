@@ -207,6 +207,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .backtest-table td{padding:8px 12px;border-bottom:1px solid rgba(30,45,74,0.5);color:var(--text-secondary)}
 
 </style>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 </head>
 <body>
 <div class="app-layout" id="appRoot">
@@ -243,8 +246,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
     <div class="nav-item" data-page="backtest-pool"><span class="nav-icon">&#x1F3AF;</span> 回测池管理</div>
     <div class="nav-item" data-page="params"><span class="nav-icon">&#x2699;&#xFE0F;</span> 策略参数</div>
     <div class="nav-divider"></div>
-    <div class="nav-item" onclick="window.open('/stock-manager/cron-monitor.html','_self')" style="cursor:pointer"><span class="nav-icon">&#x23F1;&#xFE0F;</span> 任务监控</div>
+    <div class="nav-item" onclick="window.open(window.location.origin+'/stock-manager/cron-monitor.html','_blank')" style="cursor:pointer"><span class="nav-icon">&#x23F1;&#xFE0F;</span> 任务监控</div>
     <div class="nav-section-title">&#x2699;&#xFE0F; 系统</div>
+    <div class="nav-item" onclick="window.open('/stock-manager/api-settings.html','_self')" style="cursor:pointer"><span class="nav-icon">🔑</span> API管理</div>
+    <div class="nav-item" onclick="window.open('/stock-manager/db-dictionary.html','_self')" style="cursor:pointer"><span class="nav-icon">📚</span> 数据字典</div>
     <div class="nav-item" data-page="system"><span class="nav-icon">&#x1F6E0;&#xFE0F;</span> 系统管理</div>
   </nav>
   <div class="sidebar-footer">
@@ -553,7 +558,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 <div class="modal-overlay" id="modalOverlay">
   <div class="modal" id="modalContent"></div>
 </div>
-<script>
+<style>
 /* ═══ 手机端汉堡菜单 CSS ═══ */
 .hamburger{display:none;position:fixed;top:10px;left:12px;z-index:110;background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);width:40px;height:40px;align-items:center;justify-content:center;cursor:pointer;font-size:24px;color:var(--text-bright);transition:all var(--transition)}
 .hamburger:hover{background:var(--bg-card-hover);border-color:var(--border-light)}
@@ -625,8 +630,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
   #signalSummary,#portfolioSummary,#scoreSummary{font-size:11px!important}
   .dash-main-card .dash-value{font-size:18px!important}
   .dash-main-card .dash-label{font-size:10px!important}
-}
-
+}</style>
+<script>
 /* ============================================================
    股票智能分析管理系统 v1.0 — 前端SPA
    悟道篇 × 缠论 × 恒纪元
@@ -641,20 +646,17 @@ const PAGE_SIZE = 30;
 async function GET(path, params={}) {
   const u = new URL(API+path, location.origin);
   Object.entries(params).forEach(([k,v])=>{ if(v!==''&&v!=null) u.searchParams.set(k,v); });
-  let lastErr;
-  for(let i=0;i<4;i++){
-    try {
-      const r = await fetch(u.toString(), {headers:{Accept:'application/json'},signal:AbortSignal.timeout(15000)});
-      if(!r.ok) throw new Error('HTTP '+r.status);
-      return await r.json();
-    } catch(e) {
-      lastErr=e.message;
-      if(i<3){ console.warn(`API retry ${i+1}/4: ${path} (${e.message})`); await new Promise(r=>setTimeout(r,15000)); }
-      else console.error(`API FAILED after 4 tries: ${path} (${e.message})`);
-    }
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(()=>ctrl.abort(), 8000);
+    const r = await fetch(u.toString(), {headers:{Accept:'application/json'},signal:ctrl.signal});
+    clearTimeout(tid);
+    if(!r.ok) return {code:-1,error:'HTTP '+r.status,data:null};
+    return await r.json();
+  } catch(e) {
+    console.warn(`API ${path}: ${e.message}`);
+    return {code:-1,error:e.message,data:null};
   }
-  console.error(`❌ ${path} 全部4次失败 → 返回-1`);
-  return {code:-1,error:'API all 4 tries failed: '+lastErr,data:null};
 }
 async function POST(path, body={}) {
   try {
@@ -680,7 +682,7 @@ function toggleSidebar(){
   document.getElementById('sidebarOverlay').classList.toggle('show');
   document.getElementById('hamburgerBtn').classList.toggle('active');
 }
-document.querySelectorAll('.nav-item').forEach(el=>{ el.addEventListener('click',()=>{ if(window.innerWidth<=768) toggleSidebar(); switchPage(el.dataset.page); }); });
+document.querySelectorAll('.nav-item[data-page]').forEach(el=>{ el.addEventListener('click',()=>{ if(window.innerWidth<=768) toggleSidebar(); switchPage(el.dataset.page); }); });
 function switchPage(p){
   S.page=p;
   document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active'));
@@ -1055,7 +1057,10 @@ async function loadBacktest(code){
 
 async function loadDashboard(){
   // 统一数据源: daily-summary
-  var ds=await GET('/management/daily-summary');
+  var ds;
+  try{ ds=await GET('/management/daily-summary'); }catch(e){ ds={code:-1,data:{}}; }
+  // 如果API返回错误，使用空对象防止后续代码崩溃
+  if(!ds||ds.code!==0) ds={data:{}};
   var dd=ds?.data||{};
   var season_info=dd;
   var snap={
@@ -1316,7 +1321,7 @@ function renderSignals(sigs){
     const sc=fmtS(parseFloat(s.v_score||s.raw_score||50)), dir=s.signal_type||s.signal||'WAIT', dc=dirCls(dir);
     const pos=parseFloat(s.position_pct||0)?parseFloat(s.position_pct||0).toFixed(0)+'%':'--';
     return '<div class="signal-card '+(dc==='BUY'?'buy':dc==='SELL'?'sell':'wait')+'">'+
-      '<div class="signal-top"><div class="stock-info"><span class="signal-badge '+dc+'">'+sigEm(dir)+' '+dir+'</span><div><div class="stock-name">'+(s.name||s.stock_name||'--')+'</div><div class="stock-code">'+(s.ts_code||s.code||'')+'</div></div></div>'+
+      '<div class="signal-top"><div class="stock-info"><span class="signal-badge '+dc+'">'+(s.signal_label||sigEm(dir)+' '+dir)+'</span><div><div class="stock-name">'+(s.name||s.stock_name||'--')+'</div><div class="stock-code">'+(s.ts_code||s.code||'')+'</div></div></div>'+
       '<div style="font-size:20px;font-weight:700;color:'+sc.c+'">'+sc.t+'</div></div>'+
       '<div class="signal-details">'+
       '<div class="signal-detail-item"><span class="label">💰 仓位</span> <span class="value">'+pos+'</span></div>'+
@@ -1535,7 +1540,7 @@ function renderHistScores(data){
     var dir,dirTxt;
     if(score>=45){dir='LONG';dirTxt='买入';}else if(score>=30){dir='NEUTRAL';dirTxt='观望';}else{dir='SHORT';dirTxt='卖出';}
     var cp=parseFloat(s.close_price||0);
-    return '<tr><td>'+(s.trade_date||s.date||'--')+'</td><td style="color:var(--text-bright);font-weight:600">'+(s.ts_code||s.code||'')+'</td><td>'+(s.name||s.stock_name||'--')+'</td><td style="color:var(--text-primary);font-weight:600">'+(cp>0?cp.toFixed(2):'--')+'</td><td style="color:'+cs.c+';font-weight:700">'+cs.t+'</td><td>'+fmtS(s.cycle_score).t+'</td><td>'+fmtS(s.chanlun_score||s.structure_score).t+'</td><td>'+fmtS(s.sentiment_score||s.emotion_score).t+'</td><td><span class="cycle-badge '+(s.season||'chaos')+'">'+cycEm(s.season||'chaos')+'</span></td><td><span class="signal-badge '+dirCls(dir)+'">'+sigEm(dir)+' '+dirTxt+'</span></td></tr>';
+    return '<tr><td>'+(s.trade_date||s.date||'--')+'</td><td style="color:var(--text-bright);font-weight:600">'+(s.ts_code||s.code||'')+'</td><td>'+(s.name||s.stock_name||'--')+'</td><td style="color:var(--text-primary);font-weight:600">'+(cp>0?cp.toFixed(2):'--')+'</td><td style="color:'+cs.c+';font-weight:700">'+cs.t+'</td><td>'+fmtS(s.cycle_score).t+'</td><td>'+fmtS(s.chanlun_score||s.structure_score).t+'</td><td>'+fmtS(s.sentiment_score||s.emotion_score).t+'</td><td><span class="cycle-badge '+(s.season||'chaos')+'">'+cycEm(s.season||'chaos')+'</span></td><td><span class="signal-badge '+dirCls(dir)+'">'+(s.signal_label||sigEm(dir)+' '+dirTxt)+'</span></td></tr>';
   }).join('');
   const tp=Math.ceil(data.length/PAGE_SIZE);
   let ph=''; for(let i=1;i<=tp;i++) ph+='<button class="'+(i===S.histPage?'active':'')+'" onclick="S.histPage='+i+';renderHistScores(S.histFiltered||S.histData);">'+i+'</button>';
@@ -1569,7 +1574,7 @@ function renderHistSignals(data){
     const cs=fmtS(s.raw_score||s.v_score||50);
     var dirCn={'LONG':'🟢买入','SHORT':'🔴卖出','NEUTRAL':'⏸️观望','BUY':'🟢买入','SELL':'🔴卖出','HOLD':'⏸️持有'}; var dir=s.direction||'WAIT'; var dirText=dirCn[dir]||dir;
     var cp=parseFloat(s.close_price||0);
-    return '<tr><td>'+(s.trade_date||s.date||'--')+'</td><td style="color:var(--text-bright);font-weight:600">'+(s.ts_code||s.code||'')+'</td><td>'+(s.name||s.stock_name||'--')+'</td><td style="color:var(--text-primary);font-weight:600">'+(cp>0?cp.toFixed(2):'--')+'</td><td style="color:'+cs.c+';font-weight:700">'+cs.t+'</td><td><span class="signal-badge '+dirCls(dir)+'">'+sigEm(dir)+' '+dirText+'</span></td><td>'+(parseFloat(s.position_pct||0)!=null?parseFloat(s.position_pct||0).toFixed(0)+'%':'--')+'</td><td><span class="cycle-badge '+(s.season||'chaos')+'">'+cycEm(s.season||'chaos')+'</span></td><td>'+(s.regime||'range')+'</td><td>'+(s.strategy_type||'--')+'</td><td class="text-muted text-sm">'+(s.reason_chain||'--')+'</td></tr>';
+    return '<tr><td>'+(s.trade_date||s.date||'--')+'</td><td style="color:var(--text-bright);font-weight:600">'+(s.ts_code||s.code||'')+'</td><td>'+(s.name||s.stock_name||'--')+'</td><td style="color:var(--text-primary);font-weight:600">'+(cp>0?cp.toFixed(2):'--')+'</td><td style="color:'+cs.c+';font-weight:700">'+cs.t+'</td><td><span class="signal-badge '+dirCls(dir)+'">'+(s.signal_label||sigEm(dir)+' '+dirText)+'</span></td><td>'+(parseFloat(s.position_pct||0)!=null?parseFloat(s.position_pct||0).toFixed(0)+'%':'--')+'</td><td><span class="cycle-badge '+(s.season||'chaos')+'">'+cycEm(s.season||'chaos')+'</span></td><td>'+(s.regime||'range')+'</td><td>'+(s.strategy_type||'--')+'</td><td class="text-muted text-sm">'+(s.reason_chain||'--')+'</td></tr>';
   }).join('');
   const tp=Math.ceil(data.length/PAGE_SIZE);
   let ph=''; for(let i=1;i<=tp;i++) ph+='<button class="'+(i===S.histPage?'active':'')+'" onclick="S.histPage='+i+';renderHistSignals(S.histFiltered||S.histData);">'+i+'</button>';
@@ -1986,16 +1991,17 @@ async function confirmScreenshotImport() {
 }
 
 // ═══ 初始化 ═══
-(async function init(){
+;(async function init(){
   // Set default date for history
   $$('historyDate').value = TODAY;
   // Load market status for top bar
   await loadMarketStatus();
   // Load initial page
-  loadDashboard();
+  switchPage('dashboard');
   // Periodic refresh (every 60s)
   setInterval(loadMarketStatus, 60000);
 })();
 </script>
+<!-- v20260530-001 -->
 </body>
 </html>
