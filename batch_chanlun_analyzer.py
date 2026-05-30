@@ -6,7 +6,7 @@
 跑完整缠论分析(分型→笔→中枢→背驰→买卖点)并写入 chanlun_structure 表
 """
 import os, sys, time, json, math
-from db_config import db_cursor, get_connection
+from db_config import db_cursor, get_connection, get_user_id
 import pymysql
 from datetime import datetime
 
@@ -56,11 +56,11 @@ def main():
     cur = conn.cursor(pymysql.cursors.DictCursor)
 
     # 获取股票池: 回测池 ACTIVE + 监控池 ACTIVE
-    cur.execute("""
+    cur.execute(f"""
         SELECT DISTINCT ts_code, name FROM (
             SELECT ts_code, name FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'
             UNION
-            SELECT ts_code, name FROM watch_pool WHERE is_active=1 AND user_id='tony'
+            SELECT ts_code, name FROM watch_pool WHERE is_active=1 AND user_id='{get_user_id()}'
         ) AS pool ORDER BY ts_code
     """)
     stocks = cur.fetchall()

@@ -111,6 +111,27 @@ def serialize_rows(rows):
 # 兼容旧名
 _serialize_rows = serialize_rows
 
+# ─── 用户ID管理 ────────────────────────────────────────────
+def get_user_id():
+    """从system_config获取默认用户ID，硬编码统一入口"""
+    try:
+        cur = _get_cursor()
+        cur.execute("SELECT config_value FROM system_config WHERE config_key='default_user_id' LIMIT 1")
+        r = cur.fetchone()
+        cur.close()
+        if r:
+            v = r['config_value'] if isinstance(r, dict) else r[0]
+            if v: return v
+    except:
+        pass
+    return 'tony'
+
+def _get_cursor():
+    """内部获取游标，不依赖flask上下文"""
+    conn = pymysql.connect(host='127.0.0.1', port=3306, user='debian-sys-maint',
+        password=_get_password(), database='stock_db', charset='utf8mb4')
+    return conn.cursor(pymysql.cursors.DictCursor)
+
 # ─── 铁律: 数据标记 + 重试 ────────────────────────────────────
 DATA_ERROR_MARKER = -1
 # -1标记的数据不可参与评分/回测计算

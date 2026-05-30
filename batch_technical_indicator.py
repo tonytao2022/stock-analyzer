@@ -6,7 +6,7 @@
 计算 MACD/RSI/布林带/MA/ATR/KDJ → 写入 technical_indicator 表
 """
 import os, sys, time, math, pymysql
-from db_config import db_cursor, get_connection
+from db_config import db_cursor, get_connection, get_user_id
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -145,11 +145,11 @@ def main():
     cur = conn.cursor(pymysql.cursors.DictCursor)
 
     # 获取股票池
-    cur.execute("""
+    cur.execute(f"""
         SELECT DISTINCT ts_code FROM (
             SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'
             UNION
-            SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='tony'
+            SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='{get_user_id()}'
         ) AS pool ORDER BY ts_code
     """)
     codes = [r['ts_code'] for r in cur.fetchall()]

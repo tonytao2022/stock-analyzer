@@ -1493,7 +1493,7 @@ def update_position_date():
         data = request.get_json()
         ts_code = data.get('ts_code', '')
         new_date = data.get('trade_date', '')
-        user_id = data.get('user_id', 'tony')
+        user_id = data.get('user_id', _get_user_id())
         if not ts_code or not new_date:
             return api_error('参数不足')
         with db_cursor() as cur:
@@ -2168,7 +2168,7 @@ def portfolio_lock():
         data = request.get_json(force=True) or {}
         ts_code = data.get('ts_code', '')
         days = int(data.get('days', 21))
-        user_id = data.get('user_id', 'tony')
+        user_id = data.get('user_id', _get_user_id())
         if not ts_code: return api_error('参数不足')
         with db_cursor() as cur:
             cur.execute("""
@@ -2200,7 +2200,7 @@ def portfolio_unlock():
         data = request.get_json(force=True) or {}
         ts_code = data.get('ts_code', '')
         reason = data.get('reason', '')
-        user_id = data.get('user_id', 'tony')
+        user_id = data.get('user_id', _get_user_id())
         if not ts_code or not reason: return api_error('参数不足（解锁需填写原因）')
         with db_cursor() as cur:
             cur.execute("""
@@ -3107,7 +3107,7 @@ def portfolio_holding_add():
         cost_price = float(data.get('cost_price', 0))
         current_price = float(data.get('current_price', 0))
         trade_date = data.get('trade_date', datetime.now().strftime('%Y-%m-%d'))
-        user_id = data.get('user_id', 'tony')
+        user_id = data.get('user_id', _get_user_id())
         if not ts_code or qty <= 0 or cost_price <= 0:
             return api_error('参数不足: ts_code/qty/cost_price 必填')
         market_value = qty * current_price
@@ -3136,7 +3136,7 @@ def portfolio_holding_update():
         data = request.get_json()
         holding_id = data.get('id')
         ts_code = data.get('ts_code', '')
-        user_id = data.get('user_id', 'tony')
+        user_id = data.get('user_id', _get_user_id())
         if not holding_id and not ts_code:
             return api_error('缺少id或ts_code')
         update_fields = []
@@ -3189,7 +3189,7 @@ def portfolio_holding_delete():
         data = request.get_json()
         holding_id = data.get('id')
         ts_code = data.get('ts_code', '')
-        user_id = data.get('user_id', 'tony')
+        user_id = data.get('user_id', _get_user_id())
         if not holding_id and not ts_code:
             return api_error('缺少id或ts_code')
         with db_cursor() as cur:

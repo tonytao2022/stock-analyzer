@@ -17,7 +17,7 @@
   python3 daily_pipeline.py --step score  # 只跑评分
 """
 import os, sys, time, logging, argparse
-from db_config import db_cursor, get_connection
+from db_config import db_cursor, get_connection, get_user_id
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -71,11 +71,11 @@ def step_kline():
     cur = conn.cursor(pymysql.cursors.DictCursor)
     
     # 获取股票列表
-    cur.execute("""
+    cur.execute(f"""
         SELECT DISTINCT ts_code FROM (
             SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'
             UNION
-            SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='tony'
+            SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='{get_user_id()}'
         ) AS pool
     """)
     codes = [r['ts_code'] for r in cur.fetchall()]
