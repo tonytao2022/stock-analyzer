@@ -823,6 +823,7 @@ async function loadPortfolioManage(filterCode, filterStatus){
     html+='<option value="ALL">全部</option><option value="HOLDING">持有中</option><option value="SOLD">已清仓</option></select>';
     html+='<button onclick="refreshPortfolioAdvice()" style="background:#3b82f6;color:#fff;border:none;border-radius:var(--radius-sm);padding:6px 14px;font-size:13px;cursor:pointer">🔄 更新操作建议</button>';
     html+='<button onclick="loadLockedList()" style="background:transparent;color:var(--color-warning);border:1px solid var(--color-warning);border-radius:var(--radius-sm);padding:6px 14px;font-size:13px;cursor:pointer">🔒 锁仓列表</button>';
+    html+='<button onclick="showHoldingDialog()" style="background:var(--color-safety);color:#fff;border:none;border-radius:var(--radius-sm);padding:6px 14px;font-size:13px;cursor:pointer">➕ 新增持股</button>';
     html+='</div>';
     
     // 账户概览卡片
@@ -900,7 +901,7 @@ async function loadPortfolioManage(filterCode, filterStatus){
         +'<td>'+op+'</td>'
         +'<td>'
         +(canOperate
-          ? '<div style="display:flex;gap:4px;flex-wrap:wrap"><button data-code="'+h.ts_code+'" data-name="'+(h.name||'')+'" onclick="portfolioRecalcByCode(this)" style="background:transparent;color:#3b82f6;border:1px solid #3b82f6;border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">\u{1f504} \u91cd\u7b97</button><button onclick="promptLock(\''+h.ts_code+'\',\''+(h.name||'')+'\')" style="background:transparent;color:var(--color-safety);border:1px solid var(--color-safety);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">🔒 加锁</button></div>'
+          ? '<div style="display:flex;gap:4px;flex-wrap:wrap"><button onclick="showHoldingDialog('+(h.id||0)+',\''+h.ts_code+'\',\''+(h.name||'')+'\',\''+(h.trade_date||'')+'\',\''+(h.buy_date||h.trade_date||'')+'\','+(h.qty||0)+','+(h.cost_price||0)+','+(h.current_price||0)+')" style="background:transparent;color:var(--color-hold);border:1px solid var(--color-hold);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">📝 编辑</button><button onclick="if(confirm(\'确认删除 '+h.ts_code+'?\'))deleteHolding('+(h.id||0)+',\''+h.ts_code+'\')" style="background:transparent;color:var(--color-error);border:1px solid var(--color-error);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">🗑️ 删除</button></div>'
           : '<div style="display:flex;gap:4px"><span style="font-size:10px;color:var(--text-muted)">🔒 锁仓中</span><button onclick="promptUnlock(\''+h.ts_code+'\',\''+(h.name||'')+'\')" style="background:transparent;color:var(--color-error);border:1px solid var(--color-error);border-radius:var(--radius-sm);padding:2px 6px;font-size:10px;cursor:pointer">🔓 解锁</button></div>'
         )
         +'</td>'
@@ -1838,6 +1839,112 @@ async function unlockStock(tsCode, reason, name){
       showToast('❌ 解锁失败: '+(r?.message||''));
     }
   }catch(e){showToast('❌ 解锁请求失败');}
+}
+
+// ═══ 持股增删改弹窗 ═══
+// 显示编辑/新增弹窗
+function showHoldingDialog(id, tsCode, name, tradeDate, buyDate, qty, costPrice, currentPrice) {
+  const isNew = !id || id === 0;
+  const title = isNew ? '📝 新增持股' : '📝 编辑持股';
+  const d = new Date().toISOString().split('T')[0];
+  
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  overlay.innerHTML = '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-lg);padding:24px;width:420px;max-width:90vw;max-height:90vh;overflow-y:auto">'
+    + '<div style="font-size:16px;font-weight:600;color:var(--text-bright);margin-bottom:16px">' + title + '</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;margin-bottom:16px">'
+    // 第一列
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">股票代码</label>'
+    + '<input id="hdlg_code" value="'+(tsCode||'')+'" class="form-control" style="width:100%" '+(isNew?'':'readonly')+'></div>'
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">股票名称</label>'
+    + '<input id="hdlg_name" value="'+(name||'')+'" class="form-control" style="width:100%" '+(isNew?'':'readonly')+'></div>'
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">数量(股)</label>'
+    + '<input id="hdlg_qty" type="number" value="'+(qty||'0')+'" class="form-control" style="width:100%"></div>'
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">成本价</label>'
+    + '<input id="hdlg_cost" type="number" step="0.001" value="'+(costPrice||'0')+'" class="form-control" style="width:100%"></div>'
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">当前价</label>'
+    + '<input id="hdlg_price" type="number" step="0.001" value="'+(currentPrice||'0')+'" class="form-control" style="width:100%"></div>'
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">建仓日期</label>'
+    + '<input id="hdlg_date" type="date" value="'+(buyDate||d)+'" class="form-control" style="width:100%"></div>'
+    + '</div>'
+    // 预览盈亏
+    + '<div id="hdlg_preview" style="padding:8px 12px;background:var(--bg-tooltip);border-radius:var(--radius);font-size:12px;margin-bottom:16px;color:var(--text-secondary)">填写数据后自动计算盈亏</div>'
+    // 按钮
+    + '<div style="display:flex;gap:10px;justify-content:flex-end">'
+    + '<button onclick="this.closest(\'[style*=\"z-index:9999\"]\').remove()" style="background:transparent;border:1px solid var(--border-color);color:var(--text-secondary);border-radius:var(--radius);padding:8px 20px;font-size:13px;cursor:pointer">取消</button>'
+    + '<button onclick="'+(isNew?'submitAddHolding()':'submitEditHolding('+id+')')+'" style="background:var(--color-hold);color:#fff;border:none;border-radius:var(--radius);padding:8px 20px;font-size:13px;cursor:pointer">'+(isNew?'✅ 确认新增':'✅ 保存修改')+'</button>'
+    + '</div></div>';
+  document.body.appendChild(overlay);
+  
+  // 实时预览盈亏
+  ['hdlg_qty','hdlg_cost','hdlg_price'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.oninput = function() { updateHoldingPreview(); };
+  });
+  updateHoldingPreview();
+}
+
+function updateHoldingPreview() {
+  const qty = parseFloat(document.getElementById('hdlg_qty')?.value) || 0;
+  const cost = parseFloat(document.getElementById('hdlg_cost')?.value) || 0;
+  const price = parseFloat(document.getElementById('hdlg_price')?.value) || 0;
+  const mv = qty * price;
+  const profit = (price - cost) * qty;
+  const pct = cost > 0 ? ((price - cost) / cost * 100) : 0;
+  const el = document.getElementById('hdlg_preview');
+  if (el) {
+    el.innerHTML = '📊 市值: ' + mv.toFixed(2) + ' | 盈亏: <span style="color:' + (profit>=0?'var(--color-bull)':'var(--color-bear)') + '">' + (profit>=0?'+':'') + profit.toFixed(2) + ' (' + (pct>=0?'+':'') + pct.toFixed(2) + '%)</span>';
+  }
+}
+
+async function submitAddHolding() {
+  const tsCode = document.getElementById('hdlg_code')?.value?.trim();
+  const name = document.getElementById('hdlg_name')?.value?.trim();
+  const qty = parseInt(document.getElementById('hdlg_qty')?.value) || 0;
+  const costPrice = parseFloat(document.getElementById('hdlg_cost')?.value) || 0;
+  const currentPrice = parseFloat(document.getElementById('hdlg_price')?.value) || 0;
+  const buyDate = document.getElementById('hdlg_date')?.value || '';
+  if (!tsCode || qty <= 0 || costPrice <= 0) { showToast('❌ 请填写股票代码、数量和成本价'); return; }
+  try {
+    const r = await POST('/management/portfolio/holding/add', {
+      ts_code: tsCode, name: name || tsCode,
+      qty: qty, cost_price: costPrice, current_price: currentPrice || costPrice,
+      buy_date: buyDate, trade_date: buyDate || new Date().toISOString().split('T')[0]
+    });
+    if (r?.code === 0) { showToast('✅ 新增成功'); closeDialog(); loadPortfolioManage(); }
+    else showToast('❌ ' + (r?.error || '新增失败'));
+  } catch(e) { showToast('❌ 请求失败'); }
+}
+
+async function submitEditHolding(id) {
+  const qty = parseInt(document.getElementById('hdlg_qty')?.value) || 0;
+  const costPrice = parseFloat(document.getElementById('hdlg_cost')?.value) || 0;
+  const currentPrice = parseFloat(document.getElementById('hdlg_price')?.value) || 0;
+  const buyDate = document.getElementById('hdlg_date')?.value || '';
+  const body = {};
+  if (qty > 0) body.qty = qty;
+  if (costPrice > 0) body.cost_price = costPrice;
+  if (currentPrice > 0) body.current_price = currentPrice;
+  if (buyDate) { body.buy_date = buyDate; body.trade_date = buyDate; }
+  if (id) body.id = id;
+  try {
+    const r = await POST('/management/portfolio/holding/update', body);
+    if (r?.code === 0) { showToast('✅ 更新成功'); closeDialog(); loadPortfolioManage(); }
+    else showToast('❌ ' + (r?.error || '更新失败'));
+  } catch(e) { showToast('❌ 请求失败'); }
+}
+
+async function deleteHolding(id, tsCode) {
+  try {
+    const r = await POST('/management/portfolio/holding/delete', { id: id, ts_code: tsCode });
+    if (r?.code === 0) { showToast('✅ 已删除'); loadPortfolioManage(); }
+    else showToast('❌ ' + (r?.error || '删除失败'));
+  } catch(e) { showToast('❌ 请求失败'); }
+}
+
+function closeDialog() {
+  const els = document.querySelectorAll('[style*="z-index:9999"]');
+  els.forEach(el => el.remove());
 }
 
 // ═══ 截图导入 ═══
