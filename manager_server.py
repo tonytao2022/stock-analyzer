@@ -2792,29 +2792,41 @@ def portfolio_import_screenshot_confirm():
                 
                 # 使用upsert：trade_date+ts_code确定唯一性
                 # 这里ts_code未知，用name做临时标识
-                # 先检查是否已有该名称的持仓
+                # 先检查是否已有该名称的持仓（仅OCR来源的才能被自动更新，MANUAL不受影响）
                 cur.execute(
-                    "SELECT ts_code, name FROM portfolio_holdings WHERE name=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                    "SELECT ts_code, name, source FROM portfolio_holdings WHERE name=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
                     (name,)
                 )
                 existing = cur.fetchone()
                 
                 ts_code = existing['ts_code'] if existing else f"OCR_{name}"
+                ocr_source = existing['source'] if existing else 'OCR'
                 
                 if existing:
-                    # 更新现有持仓
-                    cur.execute(
-                        """UPDATE portfolio_holdings 
-                           SET qty=%s, avail_qty=%s, current_price=%s, cost_price=%s,
-                               market_value=%s, profit_amount=%s, profit_pct=%s, trade_date=%s,
-                               status=%s, user_id=%s, updated_at=NOW()
-                           WHERE ts_code=%s AND status='HOLDING'
-                           ORDER BY trade_date DESC LIMIT 1""",
-                        (qty, avail_qty, current_price, cost_price,
-                         market_value, profit_amount, profit_pct, trade_date,
-                         status, user_id, ts_code)
-                    )
-                    updated += 1
+                    # 仅当原记录为OCR来源时才自动更新；MANUAL记录不动
+                    if ocr_source == 'OCR':
+                        cur.execute(
+                            """UPDATE portfolio_holdings 
+                               SET qty=%s, avail_qty=%s, current_price=%s, cost_price=%s,
+                                   market_value=%s, profit_amount=%s, profit_pct=%s, trade_date=%s,
+                                   status=%s, user_id=%s, updated_at=NOW()
+                               WHERE ts_code=%s AND status='HOLDING' AND source='OCR'
+                               ORDER BY trade_date DESC LIMIT 1""",
+                            (qty, avail_qty, current_price, cost_price,
+                             market_value, profit_amount, profit_pct, trade_date,
+                             status, user_id, ts_code)
+                        )
+                        updated += 1
+                    else:
+                        # MANUAL记录仅更新价格数据，不覆盖其他字段
+                        cur.execute(
+                            """UPDATE portfolio_holdings 
+                               SET current_price=%s, market_value=%s, profit_amount=%s, profit_pct=%s, updated_at=NOW()
+                               WHERE ts_code=%s AND status='HOLDING' AND source='MANUAL'
+                               ORDER BY trade_date DESC LIMIT 1""",
+                            (current_price, market_value, profit_amount, profit_pct, ts_code)
+                        )
+                        updated += 1
                 else:
                     # 插入新持仓
                     cur.execute(
