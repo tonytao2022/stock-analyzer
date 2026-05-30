@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.bak*
+*.bak.*
+*.log
+.gitignore
+venv/
+__pycache__/
+*.pyc
+*.bak*
+*.bak.*
+sql/
+stock-manager/
+!db_backup/

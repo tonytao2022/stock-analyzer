@@ -84,6 +84,46 @@ def health():
         return api_error(str(e), http_status=500)
 
 
+# ─── POST /api/v1/management/system/backup ──────────────────
+@app.route('/api/v1/management/system/backup', methods=['POST'])
+def backup_database():
+    """数据库备份 — 调用 backup_db.sh"""
+    import subprocess, time
+    script = '/root/.openclaw/workspace/projects/陶的投资预测模型项目/代码实现/backup_db.sh'
+    if not os.path.exists(script):
+        return api_error('备份脚本不存在')
+    
+    try:
+        t0 = time.time()
+        result = subprocess.run(
+            ['bash', script],
+            capture_output=True, text=True, timeout=120
+        )
+        elapsed = round(time.time() - t0, 1)
+        
+        if result.returncode != 0:
+            return api_error(f'备份失败(code={result.returncode}): {result.stderr[-300:] if result.stderr else result.stdout[-300:]}')
+        
+        # 解析输出
+        file_info = ''; size_info = ''
+        for line in result.stdout.split('\n'):
+            if '文件:' in line: file_info = line.split('文件:')[-1].strip()
+            if '大小:' in line: size_info = line.split('大小:')[-1].strip()
+        
+        from datetime import datetime as dtdt
+        return api_success({
+            'message': f'备份成功 ({elapsed}秒)',
+            'file': file_info,
+            'size': size_info,
+            'time': dtdt.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'output': result.stdout[-500:]
+        })
+    except subprocess.TimeoutExpired:
+        return api_error('备份超时(>120秒)')
+    except Exception as e:
+        return api_error(f'备份异常: {str(e)}')
+
+
 # ─── GET /api/v1/management/portfolio ───────────────────────
 @app.route('/api/v1/management/portfolio', methods=['GET'])
 def portfolio():
