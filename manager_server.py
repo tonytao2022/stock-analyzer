@@ -3073,6 +3073,116 @@ def _get_mysql_pass():
     except: pass
     return 'root'
 
+# ─── POST /api/v1/management/portfolio/holding/add ──────────
+@app.route('/api/v1/management/portfolio/holding/add', methods=['POST'])
+def portfolio_holding_add():
+    """新增持仓记录"""
+    try:
+        data = request.get_json()
+        ts_code = data.get('ts_code', '')
+        name = data.get('name', '')
+        qty = int(data.get('qty', 0))
+        cost_price = float(data.get('cost_price', 0))
+        current_price = float(data.get('current_price', 0))
+        trade_date = data.get('trade_date', datetime.now().strftime('%Y-%m-%d'))
+        user_id = data.get('user_id', 'tony')
+        if not ts_code or qty <= 0 or cost_price <= 0:
+            return api_error('参数不足: ts_code/qty/cost_price 必填')
+        market_value = qty * current_price
+        profit_amount = (current_price - cost_price) * qty
+        profit_pct = ((current_price - cost_price) / cost_price) * 100 if cost_price > 0 else 0
+        buy_date = data.get('buy_date', trade_date)
+        with db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO portfolio_holdings
+                (user_id, ts_code, name, trade_date, qty, avail_qty, current_price, cost_price,
+                 market_value, profit_amount, profit_pct, status, source, lock_active, buy_date)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'HOLDING','MANUAL',0,%s)
+            """, (user_id, ts_code, name, trade_date, qty, qty, current_price, cost_price,
+                   market_value, profit_amount, profit_pct, buy_date))
+        return api_success({'ts_code': ts_code, 'name': name, 'message': '新增成功'})
+    except Exception as e:
+        logger.error(f"holding_add error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/portfolio/holding/update ───────
+@app.route('/api/v1/management/portfolio/holding/update', methods=['POST'])
+def portfolio_holding_update():
+    """更新持仓记录"""
+    try:
+        data = request.get_json()
+        holding_id = data.get('id')
+        ts_code = data.get('ts_code', '')
+        user_id = data.get('user_id', 'tony')
+        if not holding_id and not ts_code:
+            return api_error('缺少id或ts_code')
+        update_fields = []
+        update_vals = []
+        for field in ['qty', 'avail_qty', 'cost_price', 'current_price', 'name', 'status',
+                       'trade_date', 'buy_date', 'advice', 'advice_reason']:
+            if field in data:
+                update_fields.append(f"{field}=%s")
+                update_vals.append(data[field])
+        # 重算金额
+        if 'qty' in data or 'current_price' in data or 'cost_price' in data:
+            with db_cursor(commit=False) as cur:
+                if holding_id:
+                    cur.execute("SELECT qty, cost_price, current_price FROM portfolio_holdings WHERE id=%s", (holding_id,))
+                else:
+                    cur.execute(
+                        "SELECT qty, cost_price, current_price FROM portfolio_holdings WHERE user_id=%s AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                        (user_id, ts_code))
+                row = cur.fetchone()
+                if row:
+                    q = data.get('qty', row['qty'] or 0)
+                    cp = data.get('cost_price', float(row['cost_price'] or 0))
+                    pr = data.get('current_price', float(row['current_price'] or 0))
+                    mv = q * pr
+                    pa = (pr - cp) * q
+                    pp = ((pr - cp) / cp) * 100 if cp > 0 else 0
+                    update_fields.append("market_value=%s,profit_amount=%s,profit_pct=%s,updated_at=NOW()")
+                    update_vals.extend([mv, pa, pp])
+        if not update_fields:
+            return api_error('没有需要更新的字段')
+        update_sql = ", ".join(update_fields)
+        with db_cursor() as cur:
+            if holding_id:
+                cur.execute(f"UPDATE portfolio_holdings SET {update_sql} WHERE id=%s", update_vals + [holding_id])
+            else:
+                cur.execute(
+                    f"UPDATE portfolio_holdings SET {update_sql} WHERE user_id=%s AND ts_code=%s AND status='HOLDING' ORDER BY trade_date DESC LIMIT 1",
+                    update_vals + [user_id, ts_code])
+        return api_success({'message': '更新成功'})
+    except Exception as e:
+        logger.error(f"holding_update error: {e}")
+        return api_error(str(e))
+
+
+# ─── POST /api/v1/management/portfolio/holding/delete ───────
+@app.route('/api/v1/management/portfolio/holding/delete', methods=['POST'])
+def portfolio_holding_delete():
+    """删除持仓记录"""
+    try:
+        data = request.get_json()
+        holding_id = data.get('id')
+        ts_code = data.get('ts_code', '')
+        user_id = data.get('user_id', 'tony')
+        if not holding_id and not ts_code:
+            return api_error('缺少id或ts_code')
+        with db_cursor() as cur:
+            if holding_id:
+                cur.execute("DELETE FROM portfolio_holdings WHERE id=%s", (holding_id,))
+            else:
+                cur.execute(
+                    "DELETE FROM portfolio_holdings WHERE user_id=%s AND ts_code=%s",
+                    (user_id, ts_code))
+        return api_success({'message': '删除成功'})
+    except Exception as e:
+        logger.error(f"holding_delete error: {e}")
+        return api_error(str(e))
+
+
 # ─── 启动 ───────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("Starting management API server on port 8887...")
