@@ -4,17 +4,11 @@
 基于评分引擎 v2.0 前复权数据, 模拟买入/卖出操作
 """
 import pymysql, sys, math, os
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from collections import defaultdict
 
-def get_pass():
-    with open('/etc/mysql/debian.cnf') as f:
-        for line in f:
-            if 'password' in line: return line.strip().split('=')[-1].strip().strip('"').strip("'")
-pwd = get_pass()
-
 cfg = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':pwd,'database':'stock_db','charset':'utf8mb4'}
-conn = pymysql.connect(**cfg)
+conn = get_connection()
 cur = conn.cursor(pymysql.cursors.DictCursor)
 
 sys.path.insert(0, '.')

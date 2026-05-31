@@ -6,21 +6,10 @@
 计算 MACD/RSI/布林带/MA/ATR/KDJ → 写入 technical_indicator 表
 """
 import os, sys, time, math, pymysql
-from db_config import db_cursor, get_connection, get_user_id
+from db_config import get_connection
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-def get_pass():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for l in f:
-                if 'password' in l: return l.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return ''
-
-DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':get_pass(),
-      'database':'stock_db','charset':'utf8mb4'}
 
 # ─── 工具函数 ───
 def sma(data, period):
@@ -141,7 +130,7 @@ def calc_one(code, rows):
     return results, None
 
 def main():
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
 
     # 获取股票池

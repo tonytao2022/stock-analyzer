@@ -6,12 +6,13 @@ sys.path.insert(0, '/root/.openclaw/workspace/projects/陶的投资预测模型�
 pwd = os.environ.get('MYSQL_PWD', '')
 
 from score_engine import ScoreEngineV4
+from db_config import get_connection
 e = ScoreEngineV4()
 mkt = e.get_market_context()
 print(f'季节: {mkt["season"]} 置信度: {mkt["confidence"]:.0%}')
 e.score_pool(save_db=True)
 
-conn = pymysql.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=***
+conn = get_connection()
 cur = conn.cursor()
 
 # 评分分布

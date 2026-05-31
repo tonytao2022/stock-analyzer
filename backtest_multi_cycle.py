@@ -4,18 +4,9 @@
 包含: 原始评分分层 / V型映射 / 子因子贡献度分析
 """
 import os, sys, pymysql, math, json
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from datetime import datetime, date
 from collections import defaultdict
-
-def get_password():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for line in f:
-                if 'password' in line:
-                    return line.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return os.environ.get('MYSQL_PASSWORD', '')
 
 DB = {
     'host': '127.0.0.1', 'port': 3306,
@@ -130,7 +121,7 @@ def evaluate_raw(all_records, forward_days):
     }
 
 def main():
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
     
     # 读取已有的评分数据

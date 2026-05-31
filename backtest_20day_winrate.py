@@ -5,25 +5,14 @@
 回测56只回测池股票的评分信号，统计不同持有周期的胜率和收益
 """
 import os, sys, pymysql, math
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from datetime import datetime, date
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def get_password():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for l in f:
-                if 'password' in l: return l.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return ''
-
-DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint',
-      'password':get_password(),'database':'stock_db','charset':'utf8mb4'}
-
 def main():
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
     
     # 最新评分结果（从 trend_score 或 strategy_signal 取今日评分）

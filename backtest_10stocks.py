@@ -3,20 +3,9 @@
 10只股票精细回测 — 逐因子、逐日验证评分对未来收益的预测力
 """
 import os, sys, pymysql, math, json
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from datetime import datetime, date, timedelta
 from collections import defaultdict
-
-def get_password():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for line in f:
-                if 'password' in line:
-                    return line.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return os.environ.get('MYSQL_PASSWORD', '')
-
-DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':get_password(),'database':'stock_db','charset':'utf8mb4'}
 
 # ─── 工具函数 ───
 def roll_mean(d, w):
@@ -120,7 +109,7 @@ def score_one(close, highs, lows, vols, i, ma5,ma10,ma20,ma60,ma120, std20, hh20
 
 # ─── 主流程 ───
 def main():
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     
     stocks = [
         ('001211.SZ','双枪科技'),('001696.SZ','宗申动力'),('000048.SZ','京基智农'),

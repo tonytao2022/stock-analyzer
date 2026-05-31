@@ -11,21 +11,12 @@
 - 混沌(chaos): 均线缠绕
 """
 import os, sys
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 import pymysql
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 
 # ─── DB ───
-def get_password():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for line in f:
-                if 'password' in line:
-                    return line.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return os.environ.get('MYSQL_PASSWORD', '')
-
 DB_CONFIG = {
     'host': '127.0.0.1', 'port': 3306,
     'user': 'debian-sys-maint', 'password': get_password(),

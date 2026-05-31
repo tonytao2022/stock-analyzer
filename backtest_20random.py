@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """随机20只股票 v4.0 多周期回测"""
 import pymysql, sys, os, json, math, random
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from collections import defaultdict, namedtuple
-
-def get_pass():
-    with open('/etc/mysql/debian.cnf') as f:
-        for line in f:
-            if 'password' in line: return line.strip().split('=')[-1].strip().strip('"').strip("'")
-pwd = get_pass()
 
 sys.path.insert(0, '.')
 from score_engine import ScoreEngineV4

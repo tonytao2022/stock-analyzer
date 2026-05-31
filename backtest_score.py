@@ -12,20 +12,11 @@
 输出: 每日每只股票0-100综合评分 → 对比N日后实际收益 → 统计IC/分层收益
 """
 import os, sys, pymysql, math, time
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from datetime import datetime, date, timedelta
 from collections import defaultdict, OrderedDict
 
 # ─── DB ───
-def get_password():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for line in f:
-                if 'password' in line:
-                    return line.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return os.environ.get('MYSQL_PASSWORD', '')
-
 DB = {
     'host': '127.0.0.1', 'port': 3306,
     'user': 'debian-sys-maint', 'password': get_password(),
@@ -329,7 +320,7 @@ def evaluate_predictive_power(all_results, forward_days=5):
 # ═══════════════════════════════════════════════
 
 def main():
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
     
     # 获取回测池股票

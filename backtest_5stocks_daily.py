@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """5只股票逐日评分回测 — 2026-05-10 至 2026-05-25"""
 import pymysql, sys
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 sys.path.insert(0, '.')
 from score_engine import score_trend, score_momentum, score_volatility, score_volume, vmap
 
-def get_pass():
-    with open('/etc/mysql/debian.cnf') as f:
-        for line in f:
-            if 'password' in line:
-                return line.strip().split('=')[-1].strip().strip('"').strip("'")
-
-conn = pymysql.connect(host='127.0.0.1', port=3306, user='debian-sys-maint', password=get_pass(), database='stock_db', charset='utf8mb4')
+conn = get_connection()
 cur = conn.cursor(pymysql.cursors.DictCursor)
 
 stocks = {

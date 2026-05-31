@@ -6,28 +6,12 @@
 跑完整缠论分析(分型→笔→中枢→背驰→买卖点)并写入 chanlun_structure 表
 """
 import os, sys, time, json, math
-from db_config import db_cursor, get_connection, get_user_id
+from db_config import get_connection
 import pymysql
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine.chanlun_analyzer import analyze_chanlun
-
-# ─── 数据库连接 ───
-def get_pass():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for l in f:
-                if 'password' in l:
-                    return l.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return os.environ.get('MYSQL_PASSWORD', '')
-
-DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint',
-      'password':get_pass(),'database':'stock_db','charset':'utf8mb4'}
-
-def db_conn():
-    return pymysql.connect(**DB)
 
 def load_kline(cur, ts_code, lookback=400):
     """加载一只股票的前复权K线"""

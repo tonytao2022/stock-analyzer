@@ -7,14 +7,8 @@
   2. 10日复查时 CAUTIOUS_BUY 也续持, 但止损缩到 ATR×0.8
 """
 import pymysql, sys
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from collections import defaultdict
-
-def get_pass():
-    with open('/etc/mysql/debian.cnf') as f:
-        for line in f:
-            if 'password' in line: return line.strip().split('=')[-1].strip().strip('"').strip("'")
-pwd = get_pass()
 
 sys.path.insert(0, '.')
 from engine.vmap import vmap_score
@@ -24,8 +18,7 @@ from engine.indicators import rsi, sma, atr
 from engine.sentiment_scorer import score_sentiment
 from engine.block_weights import get_block_weights, apply_block_weights
 
-CFG = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':pwd,'database':'stock_db','charset':'utf8mb4'}
-conn = pymysql.connect(**CFG)
+conn = get_connection()
 cur = conn.cursor(pymysql.cursors.DictCursor)
 
 target_inds = ['半导体','元器件','通信设备','IT设备','电气设备']

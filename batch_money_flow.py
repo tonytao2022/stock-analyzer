@@ -5,19 +5,8 @@
 从 Tushare moneyflow 拉取最新资金流向数据 → money_flow 表
 """
 import os, sys, time, pymysql, tushare as ts
-from db_config import db_cursor, get_connection, get_user_id
+from db_config import get_connection
 from datetime import datetime, date, timedelta
-
-def get_pass():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for l in f:
-                if 'password' in l: return l.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return ''
-
-DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':get_pass(),
-      'database':'stock_db','charset':'utf8mb4'}
 
 def get_token():
     import os
@@ -38,7 +27,7 @@ def main():
     ts.set_token(token)
     pro = ts.pro_api()
 
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
 
     # 获取股票池

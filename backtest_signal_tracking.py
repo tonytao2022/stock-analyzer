@@ -11,19 +11,11 @@
 最终回答：实际交易中到底持多少天胜率最高？
 """
 import os, sys, time, pymysql, json
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 from datetime import datetime
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-def get_pass():
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for l in f:
-                if 'password' in l: return l.strip().split('=')[-1].strip().strip('"').strip("'")
-    except: pass
-    return ''
 
 DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':get_pass(),
       'database':'stock_db','charset':'utf8mb4'}
@@ -31,7 +23,7 @@ DB = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':get_pa
 COST_RATE = 0.003  # 交易成本: 万3佣金+千1印花税
 
 def main():
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
 
     # 读取历史评分数据

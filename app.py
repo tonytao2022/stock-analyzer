@@ -475,5 +475,6 @@ def stock_detail(ts_code):
 
 # ─── 启动 ───────────────────────────────────────────────────
 if __name__ == '__main__':
-    logger.info("Starting trend_score API server on port 8888...")
-    app.run(host='0.0.0.0', port=8888, debug=False)
+    port_8888 = int(os.environ.get('STOCK_PORT_8888', 8888))
+    logger.info(f"Starting trend_score API server on port {port_8888}...")
+    app.run(host='0.0.0.0', port=port_8888, debug=False)
