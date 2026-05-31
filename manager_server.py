@@ -3205,6 +3205,50 @@ def portfolio_holding_delete():
         return api_error(str(e))
 
 
+# ═══════════════════════════════════════════════
+# 兮易AI大脑 - 品质专员API
+# ═══════════════════════════════════════════════
+
+@app.route('/api/v1/xiyi/kpis', methods=['GET'])
+def xiyi_kpis():
+    """获取品质专员KPI指标"""
+    try:
+        role = request.args.get('role', 'quality_specialist')
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM xiyi_demo.kpis WHERE role_id=%s ORDER BY id", (role,))
+            rows = serialize_rows(cur.fetchall())
+        return api_success({'kpis': rows})
+    except Exception as e:
+        logger.error(f"xiyi_kpis error: {e}")
+        return api_error(str(e))
+
+@app.route('/api/v1/xiyi/scenarios', methods=['GET'])
+def xiyi_scenarios():
+    """获取品质专员工作场景"""
+    try:
+        role = request.args.get('role', 'quality_specialist')
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM xiyi_demo.scenarios WHERE role_id=%s ORDER BY id", (role,))
+            rows = serialize_rows(cur.fetchall())
+        return api_success({'scenarios': rows})
+    except Exception as e:
+        logger.error(f"xiyi_scenarios error: {e}")
+        return api_error(str(e))
+
+@app.route('/api/v1/xiyi/alerts', methods=['GET'])
+def xiyi_alerts():
+    """获取告警动态"""
+    try:
+        role = request.args.get('role', 'quality_specialist')
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT * FROM xiyi_demo.alerts WHERE role_id=%s ORDER BY alert_time DESC", (role,))
+            rows = serialize_rows(cur.fetchall())
+        return api_success({'alerts': rows})
+    except Exception as e:
+        logger.error(f"xiyi_alerts error: {e}")
+        return api_error(str(e))
+
+
 # ─── 启动 ───────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("Starting management API server on port 8887...")
