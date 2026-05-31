@@ -43,7 +43,7 @@ print(f"\n{'─'*110}")
 print("📊 Part 2: 多周期回测 — 原始分层 vs V型映射")
 print(f"{'─'*110}")
 
-conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',password=pwd,database='stock_db',charset='utf8mb4')
+conn = get_connection()
 cur = conn.cursor(pymysql.cursors.DictCursor)
 
 # 为每只股票跑历史回测

@@ -4,7 +4,7 @@
 用法: python fetch_backtest_kline.py [--days 365]
 """
 import os, sys, time, argparse
-from db_config import db_cursor, get_connection
+from db_config import get_connection
 import pymysql
 import tushare as ts
 from datetime import datetime, date, timedelta
@@ -27,17 +27,13 @@ def get_password():
     except: pass
     return os.environ.get('MYSQL_PASSWORD', '')
 
-DB = {
-    'host': '127.0.0.1', 'port': 3306,
-    'user': 'debian-sys-maint', 'password': get_password(),
-    'database': 'stock_db', 'charset': 'utf8mb4', 'autocommit': True
-}
+
 
 # ─── Tushare初始化 ───
 token = os.environ.get('TUSHARE_TOKEN', '')
 if not token:
     # fallback: from MySQL
-    with pymysql.connect(**DB) as c:
+    with get_connection() as c:
         cu = c.cursor(pymysql.cursors.DictCursor)
         cu.execute("SELECT api_key FROM openclaw_config.api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
         row = cu.fetchone()
@@ -50,7 +46,7 @@ pro = ts.pro_api()
 
 # ─── 获取回测池股票列表 ───
 def get_backtest_stocks():
-    with pymysql.connect(**DB) as c:
+    with get_connection() as c:
         cu = c.cursor(pymysql.cursors.DictCursor)
         cu.execute("SELECT ts_code, name, market FROM backtest_pool WHERE status='ACTIVE' ORDER BY ts_code")
         return cu.fetchall()
@@ -120,7 +116,7 @@ def main():
     total_rows = 0
     failed = []
     
-    conn = pymysql.connect(**DB)
+    conn = get_connection()
     
     for i in range(0, len(stocks), args.batch_size):
         batch = stocks[i:i + args.batch_size]
@@ -158,7 +154,7 @@ def main():
         print(f"   失败列表: {', '.join(failed[:10])}" + ('...' if len(failed)>10 else ''))
     
     # ─── 检查数据覆盖 ───
-    with pymysql.connect(**DB) as c:
+    with get_connection() as c:
         cu = c.cursor()
         cu.execute("""
             SELECT COUNT(DISTINCT ts_code) AS stock_cnt, 

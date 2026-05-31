@@ -12,7 +12,7 @@ def get_token():
     import os
     tk = os.environ.get('TUSHARE_TOKEN', '')
     if tk: return tk
-    conn = pymysql.connect(**{**DB, 'database':'openclaw_config'})
+    conn = pymysql.connect(**{**get_connection(), 'database':'openclaw_config'})
     cur = conn.cursor()
     cur.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
     r = cur.fetchone()

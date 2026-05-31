@@ -17,11 +17,7 @@ from datetime import datetime, date, timedelta
 from collections import defaultdict, OrderedDict
 
 # ─── DB ───
-DB = {
-    'host': '127.0.0.1', 'port': 3306,
-    'user': 'debian-sys-maint', 'password': get_password(),
-    'database': 'stock_db', 'charset': 'utf8mb4'
-}
+
 
 # ═══════════════════════════════════════════════
 # 因子计算模块

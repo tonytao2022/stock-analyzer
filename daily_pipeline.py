@@ -25,17 +25,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger('daily_pipeline')
 
-def get_mysql_pass():
-    """从 debian.cnf 读取 MySQL 密码"""
-    try:
-        with open('/etc/mysql/debian.cnf') as f:
-            for line in f:
-                if 'password' in line:
-                    return line.strip().split('=')[-1].strip().strip('"').strip("'")
-    except:
-        pass
-    return ''
-
 def run_step(name, func, *args, **kwargs):
     logger.info(f"{'='*50}")
     logger.info(f"🚀 [{name}] 开始...")
@@ -58,16 +47,14 @@ def step_kline():
         import os
         tk = os.environ.get('TUSHARE_TOKEN', '')
         if tk: return tk
-        c2 = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-            password=get_mysql_pass(),database='openclaw_config',charset='utf8mb4')
+        c2 = get_connection()
         cu2 = c2.cursor()
         cu2.execute("SELECT api_key FROM api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
         r2 = cu2.fetchone()
         cu2.close(); c2.close()
         return r2[0] if r2 else ''
     
-    conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-        password=get_mysql_pass(),database='stock_db',charset='utf8mb4')
+    conn = get_connection()
     cur = conn.cursor(pymysql.cursors.DictCursor)
     
     # 获取股票列表
@@ -173,8 +160,7 @@ def step_snapshot():
     import pymysql
     try:
         # 读数据库中的api_key
-        conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-            password=get_mysql_pass(),database='stock_db')
+        conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT config_value FROM system_config WHERE config_key='api_key' LIMIT 1")
         row = cur.fetchone()
@@ -218,7 +204,6 @@ def step_backtest():
     except Exception as e:
         logger.error(f"❌ 回测失败: {e}")
         return None
-
 
 def main():
     ap = argparse.ArgumentParser(description='每日数据管道调度器')

@@ -8,11 +8,7 @@ from db_config import get_connection
 from datetime import datetime, date
 from collections import defaultdict
 
-DB = {
-    'host': '127.0.0.1', 'port': 3306,
-    'user': 'debian-sys-maint', 'password': get_password(),
-    'database': 'stock_db', 'charset': 'utf8mb4'
-}
+
 
 def evaluate_vmap(all_records, forward_days, center=15):
     """

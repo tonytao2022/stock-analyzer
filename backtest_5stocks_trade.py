@@ -7,7 +7,7 @@ import pymysql, sys, math, os
 from db_config import get_connection
 from collections import defaultdict
 
-cfg = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':pwd,'database':'stock_db','charset':'utf8mb4'}
+
 conn = get_connection()
 cur = conn.cursor(pymysql.cursors.DictCursor)
 

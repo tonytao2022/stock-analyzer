@@ -17,15 +17,10 @@ from datetime import datetime, date, timedelta
 from collections import defaultdict
 
 # ─── DB ───
-DB_CONFIG = {
-    'host': '127.0.0.1', 'port': 3306,
-    'user': 'debian-sys-maint', 'password': get_password(),
-    'database': 'stock_db', 'charset': 'utf8mb4',
-    'cursorclass': pymysql.cursors.DictCursor
-}
+
 
 def get_conn():
-    return pymysql.connect(**DB_CONFIG)
+    return get_connection()
 
 # ─── 恒纪元四季判定 ───
 def judge_season(ma20, ma60, ma120, close):
