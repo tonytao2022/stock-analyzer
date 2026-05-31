@@ -1492,6 +1492,9 @@ def update_position_date():
     try:
         data = request.get_json()
         ts_code = data.get('ts_code', '')
+        # 自动补全交易所后缀
+        if ts_code and '.' not in ts_code:
+            ts_code = ts_code + '.SZ' if ts_code[0] in '30' else ts_code + '.SH'
         new_date = data.get('trade_date', '')
         user_id = data.get('user_id', _get_user_id())
         if not ts_code or not new_date:
@@ -1686,6 +1689,19 @@ def portfolio_recalc_all():
             except Exception as _re:
                 logger.warning(f"  recalc {h.get('ts_code','?')}: {_re}")
                 pass
+
+        # 同步持仓状态到strategy_signal_daily
+        try:
+            with db_cursor() as _sync_cur:
+                _sync_cur.execute("""
+                    UPDATE strategy_signal_daily ssd 
+                    INNER JOIN portfolio_holdings ph ON ssd.ts_code = ph.ts_code AND ph.status='HOLDING'
+                    SET ssd.holding_status = 'HOLDING'
+                    WHERE ssd.strategy_id=1 AND ssd.trade_date = (SELECT MAX(trade_date) FROM strategy_signal_daily WHERE strategy_id=1)
+                """)
+                logger.info(f"synced holding status: {_sync_cur.rowcount} rows")
+        except Exception as _se:
+            logger.warning(f"sync holding status error: {_se}")
 
         return api_success({'updated': updated})
     except Exception as e:
@@ -2167,6 +2183,9 @@ def portfolio_lock():
     try:
         data = request.get_json(force=True) or {}
         ts_code = data.get('ts_code', '')
+        # 自动补全交易所后缀
+        if ts_code and '.' not in ts_code:
+            ts_code = ts_code + '.SZ' if ts_code[0] in '30' else ts_code + '.SH'
         days = int(data.get('days', 21))
         user_id = data.get('user_id', _get_user_id())
         if not ts_code: return api_error('参数不足')
@@ -3136,12 +3155,14 @@ def portfolio_holding_update():
         data = request.get_json()
         holding_id = data.get('id')
         ts_code = data.get('ts_code', '')
+        if ts_code and "." not in ts_code:
+            ts_code = ts_code + ".SZ" if ts_code[0] in "30" else ts_code + ".SH"
         user_id = data.get('user_id', _get_user_id())
         if not holding_id and not ts_code:
             return api_error('缺少id或ts_code')
         update_fields = []
         update_vals = []
-        for field in ['qty', 'avail_qty', 'cost_price', 'current_price', 'name', 'status',
+        for field in ['ts_code', 'qty', 'avail_qty', 'cost_price', 'current_price', 'name', 'status',
                        'trade_date', 'buy_date', 'advice', 'advice_reason']:
             if field in data:
                 update_fields.append(f"{field}=%s")
