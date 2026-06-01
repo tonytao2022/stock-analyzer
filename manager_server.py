@@ -249,7 +249,7 @@ def dashboard():
         trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
 
         with db_cursor(commit=False) as cur:
-            # Top5 买入: 改为从watch_pool_snapshot取（统一评分口径）
+            # Top5 买入: 从watch_pool_snapshot取，仅高分段≥75（May建议P0）
             cur.execute("SELECT MAX(trade_date) as d FROM watch_pool_snapshot")
             _ld = cur.fetchone()
             _td = str(_ld['d']) if _ld and _ld['d'] else trade_date
@@ -258,7 +258,7 @@ def dashboard():
                 """SELECT wps.*, sb.industry
                    FROM watch_pool_snapshot wps
                    LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
-                   WHERE wps.trade_date=%s AND wps.signal_type IN ('STRONG_BUY','BUY','CAUTIOUS_BUY')
+                   WHERE wps.trade_date=%s AND wps.signal_type IN ('STRONG_BUY','BUY')
                    ORDER BY wps.v_score DESC LIMIT 5""",
                 [_td]
             )
@@ -1752,14 +1752,14 @@ def watch_pool_refresh():
                         i300 = c.fetchone()
                         regime = 'bull' if i300 and float(i300['raw_score'] or 0) > 3 else ('bear' if i300 and float(i300['raw_score'] or 0) < -2 else 'range')
                         
-                        # 信号判定
-                        if v >= 42 and ts_val >= 85:
+                        # 信号判定（v2.1 基于回测优化：高分段≥75才买入）
+                        if v >= 85:
                             signal, sig_label = 'STRONG_BUY', '🟢强烈买入'
-                        elif v >= 38 and ts_val >= 80:
+                        elif v >= 75:
                             signal, sig_label = 'BUY', '🟢买入'
-                        elif v >= 34 and ts_val >= 75:
+                        elif v >= 60:
                             signal, sig_label = 'CAUTIOUS_BUY', '🟡谨慎买入'
-                        elif v >= 20:
+                        elif v >= 30:
                             signal, sig_label = 'HOLD', '⏸️持有'
                         else:
                             signal, sig_label = 'SELL', '🔴卖出'
