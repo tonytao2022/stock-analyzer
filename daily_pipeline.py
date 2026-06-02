@@ -2,7 +2,7 @@
 """
 每日数据管道调度器 v1.0
 ======================
-每日15:30自动执行:
+每日17:00自动执行（收盘后数据齐全后运行）:
   1. 拉取回测池+监控池 最新K线 (三级回退)
   2. 同步到前复权表
   3. 跑缠论结构分析 (chanlun_structure)
@@ -16,7 +16,7 @@
   python3 daily_pipeline.py --step kline  # 只拉K线
   python3 daily_pipeline.py --step score  # 只跑评分
 """
-import os, sys, time, logging, argparse
+import os, sys, time, logging, argparse, requests
 from db_config import db_cursor, get_connection, get_user_id
 from datetime import datetime
 
@@ -134,6 +134,26 @@ def step_kline():
         "WHERE trade_date >= '2026-05-20'"
     )
     conn.commit()
+    
+    # ★ 补拉沪深300（盘中/盘后均可）：季节引擎依赖000300.SH判定交易日
+    try:
+        _r3 = requests.get('https://qt.gtimg.cn/q=sh000300', timeout=10)
+        _r3.encoding = 'gbk'
+        _v3 = _r3.text.strip().split('=')[1].strip().strip('"').split('~')
+        if _v3 and len(_v3) > 37:
+            _p = float(_v3[3]); _op = float(_v3[5]); _hi = float(_v3[33]); _lo = float(_v3[34])
+            _pc = float(_v3[32]); _vl = float(_v3[6]); _am = float(_v3[37])
+            cur2.execute("""
+                INSERT INTO daily_kline (ts_code, trade_date, open, high, low, close, vol, amount, change_pct)
+                VALUES ('000300.SH', %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE close=VALUES(close), high=VALUES(high), low=VALUES(low),
+                    open=VALUES(open), vol=VALUES(vol), amount=VALUES(amount), change_pct=VALUES(change_pct)
+            """, (today, float(_op), float(_hi), float(_lo), float(_p), float(_vl), float(_am), float(_pc)))
+            conn.commit()
+            logger.info(f"📊 沪深300已补拉: {_p} ({_pc:+.2f}%)")
+    except Exception as _e3:
+        logger.warning(f"⚠️ 沪深300补拉失败(非致命): {_e3}")
+    
     cur2.close(); cur.close(); conn.close()
     
     logger.info(f"📊 K线更新: {success}成功, {fail}失败 (共{len(codes)}只)")

@@ -255,7 +255,7 @@ def dashboard():
             _td = str(_ld['d']) if _ld and _ld['d'] else trade_date
             
             cur.execute(
-                """SELECT wps.*, sb.industry
+                """SELECT wps.*, sb.name as stock_name, sb.industry
                    FROM watch_pool_snapshot wps
                    LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
                    WHERE wps.trade_date=%s AND wps.signal_type IN ('STRONG_BUY','BUY')
@@ -276,10 +276,16 @@ def dashboard():
             season_data = {}
             if season_row:
                 se = season_row['season']
+                _season_names = {
+                    'spring':'🌸 春季','summer':'☀️ 夏季','autumn':'🍂 秋季','winter':'❄️ 冬季',
+                    'chaos':'🌪️ 混沌','chaos_spring':'🌤️ 弱春','chaos_autumn':'🌥️ 弱秋',
+                    'chaos_mild':'🌤️ 温和混沌','chaos_cold':'🌥️ 寒冷混沌','panic':'💀 恐慌','recovery':'🌱 复苏'
+                }
                 season_data = {
                     'season': se,
-                    'season_label': se,
-                    'season_emoji': {'spring':'🌺','summer':'☀️','autumn':'🍂','winter':'❄️','chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','chaos_mild':'🌤️','chaos_cold':'🌥️','panic':'💀','recovery':'🌱'}.get(se,'❓'),
+                    'season_label': _season_names.get(se, se),
+                    'season_emoji': {'spring':'🌸','summer':'☀️','autumn':'🍂','winter':'❄️',
+                        'chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','chaos_mild':'🌤️','chaos_cold':'🌥️','panic':'💀','recovery':'🌱'}.get(se,'❓'),
                     'raw_score': float(season_row['raw_score'] or 0),
                     'confidence': float(season_row['confidence'] or 0),
                     'position_label': season_row.get('position_advice', ''),
@@ -287,10 +293,21 @@ def dashboard():
 
         # 格式化top5_buys供前端渲染
         def _fmt_top(t):
+            _name = t.get('name') or t.get('stock_name') or ''
+            if not _name:
+                try:
+                    _c2 = get_connection()
+                    _cu2 = _c2.cursor()
+                    _cu2.execute("SELECT name FROM stock_basic WHERE ts_code=%s LIMIT 1", (t['ts_code'],))
+                    _rn = _cu2.fetchone()
+                    if _rn: _name = _rn['name'] if isinstance(_rn, dict) else _rn[0]
+                    _cu2.close(); _c2.close()
+                except:
+                    pass
             return {
                 'ts_code': t['ts_code'],
-                'name': t['name'],
-                'stock_name': t['name'],
+                'name': _name,
+                'stock_name': _name,
                 'code': t['ts_code'],
                 'trade_date': str(t['trade_date']),
                 'composite_score': float(t['v_score'] or 0),
@@ -1816,14 +1833,14 @@ def watch_pool_snapshot():
             # JOIN stock_basic 获取行业信息
             if trade_date:
                 cur.execute("""
-                    SELECT wps.*, sb.industry
+                    SELECT wps.*, sb.name as stock_name, sb.industry
                     FROM watch_pool_snapshot wps
                     LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
                     WHERE wps.trade_date=%s ORDER BY wps.v_score DESC
                 """,(trade_date,))
             else:
                 cur.execute("""
-                    SELECT wps.*, sb.industry
+                    SELECT wps.*, sb.name as stock_name, sb.industry
                     FROM watch_pool_snapshot wps
                     LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
                     WHERE wps.trade_date=(SELECT MAX(trade_date) FROM watch_pool_snapshot) ORDER BY wps.v_score DESC
@@ -1839,6 +1856,10 @@ def watch_pool_snapshot():
             heng_row = cur.fetchone()
 
         result_list = serialize_rows(rows)
+        # 补上name（stock_name覆盖wps.name的空值）
+        for item in result_list:
+            if not item.get('name'):
+                item['name'] = item.get('stock_name', '')
 
         if heng_row:
             heng_level = heng_row['hengjiyuan_level']
