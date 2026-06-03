@@ -91,7 +91,25 @@ for r in results[:5]:
 PYEOF
 echo "   ✅ 完成" | tee -a $LOG_FILE
 
-# 4. 完成
+# 4. 同步刷新watch_pool_snapshot（供前端监控池/持仓等页面使用）
+echo "" | tee -a $LOG_FILE
+echo "🔄 同步刷新监控池快照..." | tee -a $LOG_FILE
+cd /root/.openclaw/workspace/projects/陶的投资预测模型项目/代码实现 && source venv/bin/activate
+SNAP_RESULT=$(python3 -c "
+import sys, json
+sys.path.insert(0, '.')
+from manager_server import app
+with app.test_client() as client:
+    r = client.post('/api/v1/management/watch-pool/refresh', headers={'X-API-Key': '90a275cbcc004fd5'})
+    d = json.loads(r.data)
+    if d.get('code') == 0:
+        print(f'✅ 快照刷新: {d[\"data\"][\"updated\"]}/{d[\"data\"][\"total\"]} 只, 交易日 {d[\"data\"][\"trade_date\"]}')
+    else:
+        print(f'❌ 快照刷新失败: {d}')
+" 2>&1)
+echo "   $SNAP_RESULT" | tee -a $LOG_FILE
+
+# 5. 完成
 echo "" | tee -a $LOG_FILE
 echo "============================================================" | tee -a $LOG_FILE
 echo "✅ P6双轨评分管道完成: $(date)" | tee -a $LOG_FILE
