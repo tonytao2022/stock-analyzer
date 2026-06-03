@@ -22,7 +22,7 @@ echo "============================================================" | tee -a $LO
 # 1. 检查原始数据管道是否已完成
 echo "" | tee -a $LOG_FILE
 echo "🔍 检查今日数据..." | tee -a $LOG_FILE
-TODAY=$(python3 -c "from db_config import get_connection; c=get_connection(); cur=c.cursor(); cur.execute('SELECT MAX(trade_date) FROM daily_kline'); r=cur.fetchone(); cur.close(); c.close(); print(r[0])" 2>&1)
+TODAY=$(python3 -c "from db_config import get_connection; c=get_connection(); cur=c.cursor(); cur.execute('SELECT MAX(trade_date) FROM daily_kline'); r=cur.fetchone(); cur.close(); c.close(); print(r['MAX(trade_date)'] if r else 'None')" 2>&1)
 echo "   最新交易日: $TODAY" | tee -a $LOG_FILE
 
 # 2. P6季节判定
