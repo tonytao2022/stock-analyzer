@@ -3,10 +3,11 @@
 数据管道 v2.0 — Tushare Pro + MySQL + retry + -1标记
 ======================================================
 铁律:
-  1. 数据只来自 Tushare Pro / 腾讯财经 / 东方财富
-  2. API失败 → 等15秒 → 重试3次 → 仍失败置为-1并报警
-  3. -1标记的数据不可参与评分/回测计算
-  4. Token 从 MySQL openclaw_config 读取
+  1. 数据只来自 Tushare Pro（首选）/ 腾讯财经（L2回退）/ 东方财富（L3回退）
+  2. 实时行情使用 Tushare rt_k 接口（step_strategy_engine.fetch_realtime_price），禁止直接爬取腾讯/东方财富网页
+  3. API失败 → 等15秒 → 重试3次 → 仍失败置为-1并报警
+  4. -1标记的数据不可参与评分/回测计算
+  5. Token 从 MySQL openclaw_config 读取（统一入口 id=1）
 """
 import os, sys, time, pymysql, tushare as ts, logging
 from db_config import get_connection
