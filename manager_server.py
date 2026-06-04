@@ -249,28 +249,25 @@ def dashboard():
         trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
 
         with db_cursor(commit=False) as cur:
-            # 统一评分源：从strategy_signal取P6评分（高分段≥75）
-            cur.execute("SELECT MAX(trade_date) as d FROM strategy_signal")
+            # Top5 买入: 改为从watch_pool_snapshot取（统一评分口径）
+            cur.execute("SELECT MAX(trade_date) as d FROM watch_pool_snapshot")
             _ld = cur.fetchone()
             _td = str(_ld['d']) if _ld and _ld['d'] else trade_date
             
+            # Top5 买入: 按v_score排序取前5（与全量评分页面对齐，不依赖signal_type字段）
             cur.execute(
-                """SELECT ss.ts_code, ss.calibrated_score as v_score, ss.composite_score as raw_score,
-                          ss.track, ss.scoring_strategy,
-                          wp.name, sb.name as stock_name, sb.industry
-                   FROM strategy_signal ss
-                   JOIN watch_pool wp ON ss.ts_code = wp.ts_code AND wp.is_active=1
-                   LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
-                   WHERE ss.trade_date=%s AND ss.calibrated_score >= 75
-                   ORDER BY ss.calibrated_score DESC LIMIT 5""",
+                """SELECT wps.*, sb.industry
+                   FROM watch_pool_snapshot wps
+                   LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
+                   WHERE wps.trade_date=%s AND wps.ts_code IN (
+                       SELECT ts_code FROM watch_pool WHERE is_active=1
+                   )
+                   ORDER BY wps.v_score DESC LIMIT 5""",
                 [_td]
             )
             top_buys = cur.fetchall()
-            
-            # 补充v_score字段（供前端格式化使用）
-            # v_score已通过SQL别名传入，无需再补充
 
-            # 市场快照（从daily_snapshot取最新）
+            # 市场快照
             cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [_td])
             snapshot = cur.fetchone()
 
@@ -282,16 +279,10 @@ def dashboard():
             season_data = {}
             if season_row:
                 se = season_row['season']
-                _season_names = {
-                    'spring':'🌸 春季','summer':'☀️ 夏季','autumn':'🍂 秋季','winter':'❄️ 冬季',
-                    'chaos':'🌪️ 混沌','chaos_spring':'🌤️ 弱春','chaos_autumn':'🌥️ 弱秋',
-                    'chaos_mild':'🌤️ 温和混沌','chaos_cold':'🌥️ 寒冷混沌','panic':'💀 恐慌','recovery':'🌱 复苏'
-                }
                 season_data = {
                     'season': se,
-                    'season_label': _season_names.get(se, se),
-                    'season_emoji': {'spring':'🌸','summer':'☀️','autumn':'🍂','winter':'❄️',
-                        'chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','chaos_mild':'🌤️','chaos_cold':'🌥️','panic':'💀','recovery':'🌱'}.get(se,'❓'),
+                    'season_label': se,
+                    'season_emoji': {'spring':'🌺','summer':'☀️','autumn':'🍂','winter':'❄️','chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','chaos_mild':'🌤️','chaos_cold':'🌥️','panic':'💀','recovery':'🌱'}.get(se,'❓'),
                     'raw_score': float(season_row['raw_score'] or 0),
                     'confidence': float(season_row['confidence'] or 0),
                     'position_label': season_row.get('position_advice', ''),
@@ -299,41 +290,30 @@ def dashboard():
 
         # 格式化top5_buys供前端渲染
         def _fmt_top(t):
-            _name = t.get('name') or t.get('stock_name') or ''
-            if not _name:
-                try:
-                    _c2 = get_connection()
-                    _cu2 = _c2.cursor()
-                    _cu2.execute("SELECT name FROM stock_basic WHERE ts_code=%s LIMIT 1", (t['ts_code'],))
-                    _rn = _cu2.fetchone()
-                    if _rn: _name = _rn['name'] if isinstance(_rn, dict) else _rn[0]
-                    _cu2.close(); _c2.close()
-                except:
-                    pass
             return {
                 'ts_code': t['ts_code'],
-                'name': _name,
-                'stock_name': _name,
+                'name': t['name'],
+                'stock_name': t['name'],
                 'code': t['ts_code'],
-                'trade_date': str(_td),
+                'trade_date': str(t['trade_date']),
                 'composite_score': float(t['v_score'] or 0),
                 'score': float(t['v_score'] or 0),
                 'v_score': float(t['v_score'] or 0),
                 'raw_score': float(t['raw_score'] or 0),
-                'trend_score': float(t.get('raw_score',0) or 0),
-                'momentum_score': float(t['v_score'] or 0),
-                'signal_type': 'BUY',
-                'signal_label': '买入',
-                'season': se,
-                'regime': '',
+                'trend_score': float(t['trend_score'] or 0),
+                'momentum_score': float(t['momentum_score'] or 0),
+                'signal_type': t['signal_type'],
+                'signal_label': t['signal_label'],
+                'season': t['season'],
+                'regime': t['regime'],
                 'industry': t.get('industry', ''),
-                'ret_5d': 0.0,
-                'ret_10d': 0.0,
-                'ret_20d': 0.0,
-                'close_price': 0.0,
-                'change_pct': 0.0,
-                'position_pct': 0.0,
-                'reason_chain': f"{(se or '')}+买入",
+                'ret_5d': float(t['ret_5d'] or 0),
+                'ret_10d': float(t['ret_10d'] or 0),
+                'ret_20d': float(t['ret_20d'] or 0),
+                'close_price': float(t['close_price'] or 0),
+                'change_pct': float(t['change_pct'] or 0),
+                'position_pct': float(t['position_pct'] or 0),
+                'reason_chain': f"{t.get('season','')}+{t.get('signal_label','')}",
             }
 
         return api_success({
@@ -1316,7 +1296,7 @@ def alerts():
                 alerts.append({'level':'panic','message':'💀 市场疑似进入恐慌状态,连续评分<-3,建议关注极端反转机会'})
             elif float(latest['raw_score'] or 0) > 5:
                 alerts.append({'level':'info','message':'🔥 市场评分较高,注意追高风险'})
-            elif latesse in ('winter','autumn'):
+            elif latest['season'] in ('winter','autumn'):
                 alerts.append({'level':'warning','message':'❄️ 市场处于防守期,建议降低仓位'})
 
         return api_success({'alerts': alerts, 'total': len(alerts)})
@@ -1719,12 +1699,12 @@ def watch_pool_refresh():
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         
-        # 调用score_engine统一评分（写入trend_score + strategy_signal）
+        # 调用P6双轨评分引擎统一评分（写入strategy_signal）
         from p6_dual_track_engine import daily_pipeline as _p6_pipe
         _p6_pipe(mode='watch_pool')
-        # 从trend_score读取最新评分，写入watch_pool_snapshot
+        # 从strategy_signal（P6评分源）读取最新评分
         with db_cursor(commit=False) as cur:
-            cur.execute("SELECT MAX(trade_date) as d FROM trend_score")
+            cur.execute("SELECT MAX(trade_date) as d FROM strategy_signal")
             ld = cur.fetchone()
             trade_date = str(ld['d']) if ld and ld['d'] else str(date.today())
             
@@ -1735,7 +1715,7 @@ def watch_pool_refresh():
                     FROM strategy_signal ss
                     JOIN watch_pool wp ON ss.ts_code = wp.ts_code AND wp.is_active=1
                     LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
-                    WHERE ss.direction='dual_track_v1' AND ss.trade_date=%s ORDER BY ss.calibrated_score DESC
+                    WHERE ss.trade_date=%s ORDER BY ss.calibrated_score DESC
             """, (trade_date,))
             scores = cur.fetchall()
         
@@ -1761,6 +1741,8 @@ def watch_pool_refresh():
                     # 读取行情信息填充分项
                     c.execute("SELECT trade_date, close, high, low, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC", (code,))
                     krows = c.fetchall()
+                    _real_close = 0
+                    _chg = 0.0
                     if len(krows) >= 200:
                         closes = [float(r['close']) for r in krows]
                         chgs = [float(r.get('change_pct') or 0) for r in krows]
@@ -1775,14 +1757,16 @@ def watch_pool_refresh():
                         i300 = c.fetchone()
                         regime = 'bull' if i300 and float(i300['raw_score'] or 0) > 3 else ('bear' if i300 and float(i300['raw_score'] or 0) < -2 else 'range')
                         
-                        # 信号判定（v2.1 基于回测优化：高分段≥75才买入）
-                        if v >= 85:
+                        # 信号判定（与P6阶梯策略规则对齐）
+                        # 买入线≥75（P6 v2.1，May建议P0 + Tony确认）
+                        # 5日检视≥40 / 15日≥30 / 25日≥20 续持，否则平仓
+                        if v >= 80:
                             signal, sig_label = 'STRONG_BUY', '🟢强烈买入'
                         elif v >= 75:
                             signal, sig_label = 'BUY', '🟢买入'
-                        elif v >= 60:
+                        elif v >= 40:
                             signal, sig_label = 'CAUTIOUS_BUY', '🟡谨慎买入'
-                        elif v >= 30:
+                        elif v >= 20:
                             signal, sig_label = 'HOLD', '⏸️持有'
                         else:
                             signal, sig_label = 'SELL', '🔴卖出'
@@ -1793,36 +1777,14 @@ def watch_pool_refresh():
                             if len(closes) > p:
                                 rets[p] = round((closes[-1] - closes[-p-1]) / closes[-p-1] * 100, 2)
                         
-                        # 计算波动率（20日标准差/均值）和量能（当日量/20日均量）
-                        _vola_score = 50
-                        _volu_score = 50
-                        if len(vols) >= 20 and len(closes) >= 20:
-                            v20 = [float(x) for x in vols[-20:]]
-                            c20 = [float(x) for x in closes[-20:]]
-                            avg_c = sum(c20)/len(c20)
-                            std20 = (sum((x-avg_c)**2 for x in c20)/20)**0.5
-                            std_r = std20/avg_c if avg_c > 0 else 0
-                            # 波动率评分：0.5%~3%范围映射到0~100
-                            _vola_score = max(0, min(100, (std_r-0.003)/0.027*100))
-                            # 量能评分：当前量/20日均量 * 50 + 50
-                            avg_v = sum(v20)/20
-                            vr = v20[-1]/avg_v if avg_v > 0 else 1
-                            import logging; logging.info(f"DEBUG {code}: vola={_vola_score:.1f} volu={_volu_score:.1f} vr={vr:.2f} std_r={std_r:.4f}")
-                            _volu_score = max(0, min(100, vr*50))
-                        
                         # 真实收盘价（从daily_kline取）
                         c.execute("SELECT close, change_pct FROM daily_kline WHERE ts_code=%s AND trade_date=%s", (code, trade_date))
                         _kr = c.fetchone()
                         _real_close = float(_kr['close']) if _kr and _kr['close'] else (float(krows[-1]['close']) if krows else 0)
-                        _chg = float(_kr['change_pct']) if _kr and _kr.get('change_pct') else (_chg if 'chgs' in dir() and chgs else 0)
-                        _chg = chgs[-1] if chgs else 0
+                        _chg = chgs[-1] if chgs else 0.0
                     else:
                         signal, sig_label = 'WAIT', '⏳数据不足'
                         rets = {5: 0, 10: 0, 20: 0}
-                        _vola_score = 50
-                        _volu_score = 50
-                        _real_close = 0
-                        _chg = 0
                     
                     c.execute("""
                         INSERT INTO watch_pool_snapshot
@@ -1835,10 +1797,9 @@ def watch_pool_refresh():
                             close_price=VALUES(close_price), change_pct=VALUES(change_pct),
                             raw_score=VALUES(raw_score), v_score=VALUES(v_score),
                             signal_type=VALUES(signal_type), signal_label=VALUES(signal_label),
-                            position_pct=VALUES(position_pct), trend_score=VALUES(trend_score),
-                            volatility_score=VALUES(volatility_score), volume_score=VALUES(volume_score)
+                            position_pct=VALUES(position_pct), trend_score=VALUES(trend_score)
                     """, (code, name, trade_date, _real_close, _chg, round(raw_score, 1), v,
-                          ts_val, ms_val, int(_vola_score), int(_volu_score),
+                          ts_val, ms_val, 0, 0,
                           signal, sig_label, 0, 0, 'momentum',
                           mkt_sea, regime, rets.get(5, 0), rets.get(10, 0), rets.get(20, 0)))
                     updated += 1
@@ -1859,14 +1820,14 @@ def watch_pool_snapshot():
             # JOIN stock_basic 获取行业信息
             if trade_date:
                 cur.execute("""
-                    SELECT wps.*, sb.name as stock_name, sb.industry
+                    SELECT wps.*, sb.industry
                     FROM watch_pool_snapshot wps
                     LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
                     WHERE wps.trade_date=%s ORDER BY wps.v_score DESC
                 """,(trade_date,))
             else:
                 cur.execute("""
-                    SELECT wps.*, sb.name as stock_name, sb.industry
+                    SELECT wps.*, sb.industry
                     FROM watch_pool_snapshot wps
                     LEFT JOIN stock_basic sb ON wps.ts_code = sb.ts_code
                     WHERE wps.trade_date=(SELECT MAX(trade_date) FROM watch_pool_snapshot) ORDER BY wps.v_score DESC
@@ -1882,10 +1843,6 @@ def watch_pool_snapshot():
             heng_row = cur.fetchone()
 
         result_list = serialize_rows(rows)
-        # 补上name（stock_name覆盖wps.name的空值）
-        for item in result_list:
-            if not item.get('name'):
-                item['name'] = item.get('stock_name', '')
 
         if heng_row:
             heng_level = heng_row['hengjiyuan_level']
