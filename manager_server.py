@@ -3387,6 +3387,147 @@ def xiyi_alerts():
         return api_error(str(e))
 
 
+# ═══ 板块轮动 API ════════════════════════════════════════════
+
+@app.route('/api/v1/management/sector/rotation-top', methods=['GET'])
+def sector_rotation_top():
+    """
+    返回板块轮动 TOP10
+    数据来源: sector_chanlun_cache (缠纶结果) + sector_rotation_score (评分)
+    """
+    try:
+        limit = min(int(request.args.get('limit', 10)), 30)
+        lookback = int(request.args.get('days', 1))
+        # 支持天级别回退
+
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT MAX(trade_date) as md FROM sector_chanlun_cache")
+            _ld = cur.fetchone()
+            _td = str(_ld['md']) if _ld and _ld['md'] else str(date.today())
+
+            # 从 sector_chanlun_cache 获取最新日期的所有行业数据
+            cur.execute("""
+                SELECT cc.*, sc.score as rotation_score,
+                       sc.chanlun_score, sc.cycle_score, sc.momentum_score,
+                       sc.signal, sc.signal_label, sc.rank_change
+                FROM sector_chanlun_cache cc
+                LEFT JOIN sector_rotation_score sc ON cc.ts_code = sc.ts_code
+                    AND sc.trade_date = (SELECT MAX(trade_date) FROM sector_rotation_score)
+                WHERE cc.trade_date = (SELECT MAX(trade_date) FROM sector_chanlun_cache)
+                ORDER BY COALESCE(sc.score, cc.structure_score, 50) DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+
+            result = []
+            for r in rows:
+                entry = {
+                    'ts_code': r['ts_code'],
+                    'sector_name': r['sector_name'],
+                    'trade_date': str(r['trade_date']),
+                    'analysis_level': r['analysis_level'],
+                    'structure_score': float(r['structure_score'] or 50),
+                    'score': float(r['rotation_score'] or r['structure_score'] or 50),
+                    'composite_score': float(r['rotation_score'] or r['structure_score'] or 50),
+                    'chanlun_score': float(r['chanlun_score'] or r['structure_score'] or 50),
+                    'cycle_score': float(r['cycle_score'] or 0),
+                    'momentum_score': float(r['momentum_score'] or 0),
+                    'signal': r.get('signal') or self_signal_from_chanlun(r),
+                    'signal_label': r.get('signal_label') or '',
+                    'rank_change': r.get('rank_change') or 'SAME',
+                    'bi_direction': r['bi_direction'],
+                    'bi_count': r['bi_count'],
+                    'zhongshu_count': r['zhongshu_count'],
+                    'zoushi_type': r['zoushi_type'],
+                    'zoushi_stage': r['zoushi_stage'],
+                    'beichi_type': r['beichi_type'],
+                    'beichi_strength': float(r['beichi_strength'] or 0),
+                    'buy_sell_point': r['buy_sell_point'],
+                    'top_fractal_cnt': r['top_fractal_cnt'],
+                    'bottom_fractal_cnt': r['bottom_fractal_cnt'],
+                }
+                result.append(entry)
+
+        return api_success({'top': result, 'count': len(result), 'trade_date': _td})
+    except Exception as e:
+        logger.error(f"sector_rotation_top error: {e}")
+        return api_error(str(e))
+
+
+def self_signal_from_chanlun(r):
+    """从缠论字段推断信号"""
+    bs = r.get('buy_sell_point') or ''
+    if bs in ('buy1','buy2','buy3'):
+        return 'BUY'
+    if bs in ('sell1','sell2','sell3'):
+        return 'SELL'
+    ss = float(r.get('structure_score') or 50)
+    if ss >= 75: return 'BUY'
+    if ss >= 40: return 'HOLD'
+    return 'SELL'
+
+
+@app.route('/api/v1/management/sector/market-status', methods=['GET'])
+def sector_market_status():
+    """
+    返回当前季节/权重模式
+    数据来源: season_state + sector_chanlun_cache 聚合
+    """
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute(
+                "SELECT season, raw_score, confidence, position_advice, "
+                "hengjiyuan_level, hengjiyuan_score, confidence_mult "
+                "FROM season_state WHERE index_code='MARKET' "
+                "ORDER BY trade_date DESC LIMIT 1"
+            )
+            ss = cur.fetchone()
+
+            cur.execute("SELECT COUNT(*) as total, "
+                "SUM(CASE WHEN buy_sell_point IN ('buy1','buy2','buy3') THEN 1 ELSE 0 END) as buy_cnt, "
+                "SUM(CASE WHEN buy_sell_point IN ('sell1','sell2','sell3') THEN 1 ELSE 0 END) as sell_cnt "
+                "FROM sector_chanlun_cache WHERE trade_date = (SELECT MAX(trade_date) FROM sector_chanlun_cache)")
+            stats = cur.fetchone()
+
+            cur.execute("SELECT COUNT(*) as total FROM sector_chanlun_cache "
+                "WHERE trade_date = (SELECT MAX(trade_date) FROM sector_chanlun_cache)")
+            total_sectors = cur.fetchone()
+
+        if not ss:
+            return api_success({'trade_date': str(date.today()), 'ready': False,
+                               'season': 'unknown', 'raw_score': 0,
+                               'hengjiyuan_level': 'unknown', 'hengjiyuan_score': 0})
+
+        se = ss['season'] or 'chaos'
+        hj_level = ss['hengjiyuan_level']
+        hj_score = float(ss['hengjiyuan_score'] or 0)
+        if not hj_level:
+            hj_level = 'weak_heng'
+            hj_score = max(0, min(100, (float(ss['raw_score'] or 0) + 5) * 10))
+
+        return api_success({
+            'trade_date': str(ss.get('trade_date', '')),
+            'season': se,
+            'season_label': se,
+            'raw_score': float(ss['raw_score'] or 0),
+            'confidence': float(ss['confidence'] or 0),
+            'position_advice': ss.get('position_advice', ''),
+            'hengjiyuan_level': hj_level,
+            'hengjiyuan_score': hj_score,
+            'regime': 'bull' if float(ss['raw_score'] or 0) > 3 else ('bear' if float(ss['raw_score'] or 0) < -2 else 'range'),
+            'sector_stats': {
+                'total': int(stats['total'] or 0) if stats else 0,
+                'buy_count': int(stats['buy_cnt'] or 0) if stats else 0,
+                'sell_count': int(stats['sell_cnt'] or 0) if stats else 0,
+                'total_analyzed': int(total_sectors['total'] or 0) if total_sectors else 0,
+            },
+            'ready': True,
+        })
+    except Exception as e:
+        logger.error(f"sector_market_status error: {e}")
+        return api_error(str(e))
+
+
 # ─── 启动 ───────────────────────────────────────────────────
 if __name__ == "__main__":
     port_8887 = int(os.environ.get('STOCK_PORT_8887', 8887))
