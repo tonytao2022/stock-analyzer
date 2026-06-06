@@ -3530,9 +3530,106 @@ def sector_market_status():
         return api_error(str(e))
 
 
+# ═══════════════════════════════════════════════════════════════
+#  打板监控 API
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/management/limitup/today', methods=['GET'])
+def limitup_today():
+    try:
+        with db_cursor(commit=False) as cur:
+            cur.execute("SELECT MAX(trade_date) as md FROM limit_up_daily")
+            row = cur.fetchone()
+            if not row or not row['md']:
+                return api_success({'trade_date': str(date.today()), 'stocks': [], 'overview': {}, 'dragon_tiger_top5': []})
+            trade_date = str(row['md'])
+            cur.execute("""SELECT COUNT(*) as total_limit_up,
+                SUM(CASE WHEN limit_type IN ('涨停池','连板池') THEN 1 ELSE 0 END) as limit_up_cnt,
+                SUM(CASE WHEN limit_type = '跌停池' THEN 1 ELSE 0 END) as limit_down_cnt,
+                MAX(limit_times) as max_liaban FROM limit_up_daily WHERE trade_date = %s""", (trade_date,))
+            ov = cur.fetchone()
+            overview = {'total_limit_up': int(ov['total_limit_up'] or 0), 'limit_up_cnt': int(ov['limit_up_cnt'] or 0),
+                        'limit_down_cnt': int(ov['limit_down_cnt'] or 0), 'max_liaban': int(ov['max_liaban'] or 0)}
+            cur.execute("SELECT COUNT(*) as zhaban_cnt FROM limit_up_daily WHERE trade_date=%s AND limit_type IN ('涨停池','连板池') AND (open_times>0)", (trade_date,))
+            zb = int(cur.fetchone()['zhaban_cnt'] or 0)
+            overview['zhaban_rate'] = round(zb / overview['limit_up_cnt'] * 100, 2) if overview['limit_up_cnt'] > 0 else 0
+            cur.execute("""SELECT ts_code,name,close,pct_chg,limit_times,limit_amount,float_mv,
+                fd_amount,concept_tags,first_time,open_times,board_type,limit_type,status,tag
+                FROM limit_up_daily WHERE trade_date=%s AND limit_type IN ('涨停池','连板池')
+                ORDER BY limit_times DESC,COALESCE(fd_amount,0) DESC""", (trade_date,))
+            stocks = serialize_rows(cur.fetchall())
+            ladder = {}
+            for s in stocks:
+                lb = s.get('limit_times', 0) or 0
+                if lb not in ladder:
+                    ladder[lb] = []
+                ladder[lb].append({'name': s['name'], 'ts_code': s['ts_code'], 'limit_times': lb})
+            cur.execute("""SELECT ts_code,name,close,pct_change,l_buy,l_sell,net_buy,reason
+                FROM dragon_tiger_daily WHERE trade_date=%s
+                ORDER BY COALESCE(net_buy,0) DESC LIMIT 5""", (trade_date,))
+            dt = serialize_rows(cur.fetchall())
+        return api_success({'trade_date': trade_date, 'overview': overview, 'stocks': stocks, 'ladder': ladder, 'dragon_tiger_top5': dt})
+    except Exception as e:
+        logger.error(f"limitup_today error: {e}")
+        return api_error(str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+#  个股深度分析 API
+# ═══════════════════════════════════════════════════════════════
+
+def _get_tushare_pro():
+    import tushare as _ts
+    token = os.environ.get('TUSHARE_TOKEN', '')
+    if not token:
+        try:
+            from db_config import get_connection as _gc
+            _c = _gc(); _cu = _c.cursor()
+            _cu.execute("SELECT api_key FROM openclaw_config.api_credentials WHERE name='TUSHARE_TOKEN' AND is_active=1")
+            _r = _cu.fetchone()
+            if _r:
+                token = _r['api_key'] if isinstance(_r, dict) else _r[0]
+            _cu.close(); _c.close()
+        except: pass
+    if token:
+        _ts.set_token(token)
+
+# ═══════════════════════════════════════════════
+#  个股深度分析 API
+# ═══════════════════════════════════════════════
+
+@app.route('/api/v1/management/stock/finance', methods=['GET'])
+def stock_finance():
+    """个股财务分析概览"""
+    try:
+        ts_code = request.args.get('ts_code', '')
+        if not ts_code:
+            return api_error('缺少参数: ts_code')
+        from stock_finance_aggregator import get_stock_finance_overview
+        data = get_stock_finance_overview(ts_code)
+        return api_success(data)
+    except Exception as e:
+        logger.error(f"stock_finance error: {e}")
+        return api_error(str(e))
+
+
+@app.route('/api/v1/management/stock/factors', methods=['GET'])
+def stock_factors():
+    """个股技术因子"""
+    try:
+        ts_code = request.args.get('ts_code', '')
+        if not ts_code:
+            return api_error('缺少参数: ts_code')
+        from stock_finance_aggregator import get_stock_factors
+        data = get_stock_factors(ts_code)
+        return api_success(data)
+    except Exception as e:
+        logger.error(f"stock_factors error: {e}")
+        return api_error(str(e))
+
+
 # ─── 启动 ───────────────────────────────────────────────────
 if __name__ == "__main__":
-    port_8887 = int(os.environ.get('STOCK_PORT_8887', 8887))
+    port_8887 = int(os.environ.get("STOCK_PORT_8887", 8887))
     logger.info(f"Starting management API server on port {port_8887}...")
     app.run(host="0.0.0.0", port=port_8887, debug=False)
-
