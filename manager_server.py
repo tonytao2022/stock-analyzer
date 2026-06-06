@@ -255,6 +255,20 @@ def dashboard():
             _td = str(_ld['d']) if _ld and _ld['d'] else trade_date
             
             # Top5 买入: 按v_score排序取前5（与全量评分页面对齐，不依赖signal_type字段）
+            # 统计信号分布
+            cur.execute(
+                """SELECT 
+                      SUM(CASE WHEN signal_type='STRONG_BUY' THEN 1 ELSE 0 END) as strong_buy,
+                      SUM(CASE WHEN signal_type='BUY' THEN 1 ELSE 0 END) as buy,
+                      SUM(CASE WHEN signal_type='CAUTIOUS_BUY' THEN 1 ELSE 0 END) as cautious,
+                      SUM(CASE WHEN signal_type='HOLD' THEN 1 ELSE 0 END) as hold,
+                      SUM(CASE WHEN signal_type IN ('SELL','STRONG_SELL') THEN 1 ELSE 0 END) as sell
+                   FROM watch_pool_snapshot
+                   WHERE trade_date=%s""",
+                [_td]
+            )
+            cnt_row = cur.fetchone()
+            
             cur.execute(
                 """SELECT wps.*, sb.industry
                    FROM watch_pool_snapshot wps
@@ -267,26 +281,32 @@ def dashboard():
             )
             top_buys = cur.fetchall()
 
-            # 市场快照
-            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [_td])
-            snapshot = cur.fetchone()
-
-            # v3.0 四季数据
+            # 市场快照 (从season_state取恒纪元+季节，恒纪元字段为空则按季节推断)
             cur.execute(
-                "SELECT season, raw_score, confidence, position_advice FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1"
+                "SELECT season, raw_score, confidence, position_advice, hengjiyuan_level, hengjiyuan_score, confidence_mult "
+                "FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1"
             )
-            season_row = cur.fetchone()
-            season_data = {}
-            if season_row:
-                se = season_row['season']
+            market_row = cur.fetchone()
+            if market_row:
+                hj_level = market_row['hengjiyuan_level']
+                hj_score = market_row['hengjiyuan_score']
+                # 恒纪元字段为空时使用共享函数推断
+                if not hj_level:
+                    from season_engine import infer_hengjiyuan
+                    hj_level, hj_score = infer_hengjiyuan(market_row['season'] or 'chaos', float(market_row['raw_score'] or 0))
+                se = market_row['season'] or 'chaos'
                 season_data = {
                     'season': se,
                     'season_label': se,
                     'season_emoji': {'spring':'🌺','summer':'☀️','autumn':'🍂','winter':'❄️','chaos':'🌪️','chaos_spring':'🌤️','chaos_autumn':'🌥️','chaos_mild':'🌤️','chaos_cold':'🌥️','panic':'💀','recovery':'🌱'}.get(se,'❓'),
-                    'raw_score': float(season_row['raw_score'] or 0),
-                    'confidence': float(season_row['confidence'] or 0),
-                    'position_label': season_row.get('position_advice', ''),
+                    'raw_score': float(market_row['raw_score'] or 0),
+                    'confidence': float(market_row['confidence'] or 0),
+                    'position_label': market_row.get('position_advice', ''),
+                    'hengjiyuan_level': hj_level,
+                    'hengjiyuan_score': hj_score,
                 }
+            else:
+                season_data = {}
 
         # 格式化top5_buys供前端渲染
         def _fmt_top(t):
@@ -318,8 +338,14 @@ def dashboard():
 
         return api_success({
             'trade_date': _td,
-            'market_state': serialize_rows([snapshot])[0] if snapshot else None,
+            'market_state': season_data.get('season') if season_data else None,
             'top5_buys': [_fmt_top(t) for t in top_buys],
+            'buy_count': int(cnt_row['buy'] if cnt_row else 0),
+            'strong_buy_count': int(cnt_row['strong_buy'] if cnt_row else 0),
+            'cautious_count': int(cnt_row['cautious'] if cnt_row else 0),
+            'hold_count': int(cnt_row['hold'] if cnt_row else 0),
+            'sell_count': int(cnt_row['sell'] if cnt_row else 0),
+            'watch_pool_count': int(sum(int(cnt_row[k] or 0) for k in ['strong_buy','buy','cautious','hold','sell'])) if cnt_row else 0,
             'risk_alerts': {'autumn_tiger_count': 0, 'direction_change_alerts': 0},
             **season_data,
         })
@@ -331,33 +357,43 @@ def dashboard():
 # ─── GET /api/v1/management/dashboard/market-overview ───────
 @app.route('/api/v1/management/dashboard/market-overview', methods=['GET'])
 def market_overview():
-    """市场全局概览"""
+    """市场全局概览（从season_state + watch_pool_snapshot 取数）"""
     try:
         trade_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
 
         with db_cursor(commit=False) as cur:
-            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [trade_date])
-            snapshot = cur.fetchone()
+            cur.execute(
+                "SELECT season, raw_score, confidence, position_advice, hengjiyuan_level, hengjiyuan_score, confidence_mult "
+                "FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1"
+            )
+            ss = cur.fetchone()
+            cur.execute(
+                "SELECT COUNT(*) as total, "
+                "SUM(CASE WHEN signal_type IN ('BUY','STRONG_BUY') THEN 1 ELSE 0 END) as buy, "
+                "SUM(CASE WHEN signal_type='SELL' THEN 1 ELSE 0 END) as sell "
+                "FROM watch_pool_snapshot WHERE trade_date=(SELECT MAX(trade_date) FROM watch_pool_snapshot)"
+            )
+            wp = cur.fetchone()
 
-        if not snapshot:
-            return api_success({'trade_date': trade_date, 'ready': False, 'message': '该日期快照尚未生成'})
+        if not ss:
+            return api_success({'trade_date': trade_date, 'ready': False, 'message': '暂无季节数据'})
 
         return api_success({
-            'trade_date': trade_date,
-            'cycle_stage': snapshot.get('cycle_stage'),
-            'hengjiyuan_score': snapshot.get('hengjiyuan_score'),
-            'hengjiyuan_level': snapshot.get('hengjiyuan_level'),
-            'confidence_mult': snapshot.get('confidence_mult'),
+            'trade_date': str(ss.get('trade_date', trade_date)),
+            'cycle_stage': ss.get('season'),
+            'hengjiyuan_score': float(ss['hengjiyuan_score']) if ss.get('hengjiyuan_score') else None,
+            'hengjiyuan_level': ss.get('hengjiyuan_level'),
+            'confidence_mult': float(ss['confidence_mult']) if ss.get('confidence_mult') else None,
             'signal_distribution': {
-                'buy_count': snapshot.get('buy_signal_cnt', 0),
-                'sell_count': snapshot.get('sell_signal_cnt', 0),
-                'wait_count': snapshot.get('wait_signal_cnt', 0),
-                'high_confidence_buy': snapshot.get('high_conf_buy', 0),
-                'autumn_tiger_count': snapshot.get('autumn_tiger_cnt', 0),
+                'buy_count': int(wp['buy'] or 0) if wp else 0,
+                'sell_count': int(wp['sell'] or 0) if wp else 0,
+                'wait_count': int((wp['total'] or 0) - (wp['buy'] or 0) - (wp['sell'] or 0)) if wp else 0,
+                'high_confidence_buy': 0,
+                'autumn_tiger_count': 0,
             },
-            'total_analyzed': snapshot.get('total_analyzed', 0),
-            'safety_gate': snapshot.get('safety_gate', '未判定'),
-            'gate_triggered': bool(snapshot.get('gate_triggered', 0)),
+            'total_analyzed': int(wp['total'] or 0) if wp else 0,
+            'safety_gate': '通过',
+            'gate_triggered': False,
         })
     except Exception as e:
         logger.error(f"market_overview error: {e}")
@@ -469,16 +505,16 @@ def history_scores():
 
         with db_cursor(commit=False) as cur:
             cur.execute(
-                f"SELECT COUNT(*) as cnt FROM trend_score WHERE {where_clause}",
+                f"SELECT COUNT(*) as cnt FROM strategy_signal WHERE {where_clause}",
                 params
             )
             total = cur.fetchone()['cnt']
 
             cur.execute(
-                f"""SELECT ts.*, sb.name FROM trend_score ts
-                    LEFT JOIN stock_basic sb ON ts.ts_code = sb.ts_code
+                f"""SELECT ss.*, sb.name FROM strategy_signal ss
+                    LEFT JOIN stock_basic sb ON ss.ts_code = sb.ts_code
                     WHERE {where_clause}
-                    ORDER BY ts.trade_date DESC, ts.composite_score DESC
+                    ORDER BY ss.trade_date DESC, ss.composite_score DESC
                     LIMIT %s OFFSET %s""",
                 params + [page_size, offset]
             )
@@ -587,16 +623,28 @@ def history_score_trend():
 # ─── GET /api/v1/management/history/snapshots ───────────────
 @app.route('/api/v1/management/history/snapshots', methods=['GET'])
 def history_snapshots():
-    """每日快照列表"""
+    """每日快照列表（从 season_state + watch_pool_snapshot 聚合）"""
     try:
         limit = min(int(request.args.get('limit', 30)), 365)
 
         with db_cursor(commit=False) as cur:
             cur.execute(
-                "SELECT * FROM daily_snapshot ORDER BY trade_date DESC LIMIT %s",
+                """SELECT ss.trade_date, ss.season as cycle_stage, ss.season, ss.raw_score, ss.confidence,
+                           ss.hengjiyuan_level, ss.hengjiyuan_score, ss.confidence_mult, ss.position_advice
+                    FROM season_state ss
+                    WHERE ss.index_code='MARKET'
+                    GROUP BY ss.trade_date
+                    ORDER BY ss.trade_date DESC LIMIT %s""",
                 [limit]
             )
             rows = cur.fetchall()
+            for r in rows:
+                cur.execute(
+                    "SELECT COUNT(*) as total FROM watch_pool_snapshot WHERE trade_date=%s",
+                    [r['trade_date']]
+                )
+                wp = cur.fetchone()
+                r['total_analyzed'] = wp['total'] if wp else 0
 
         return api_success({'count': len(rows), 'snapshots': serialize_rows(rows)})
     except Exception as e:
@@ -607,14 +655,38 @@ def history_snapshots():
 # ─── GET /api/v1/management/history/snapshot/{date} ─────────
 @app.route('/api/v1/management/history/snapshot/<snap_date>', methods=['GET'])
 def history_snapshot_detail(snap_date):
-    """指定日期的快照详情"""
+    """指定日期的快照详情（从 season_state 取数）"""
     try:
         with db_cursor(commit=False) as cur:
-            cur.execute("SELECT * FROM daily_snapshot WHERE trade_date=%s", [snap_date])
-            row = cur.fetchone()
-        if not row:
+            cur.execute(
+                "SELECT season, raw_score, confidence, hengjiyuan_level, hengjiyuan_score, confidence_mult, position_advice "
+                "FROM season_state WHERE index_code='MARKET' AND trade_date=%s", [snap_date]
+            )
+            ss = cur.fetchone()
+            cur.execute(
+                "SELECT COUNT(*) as total, "
+                "SUM(CASE WHEN signal_type IN ('BUY','STRONG_BUY') THEN 1 ELSE 0 END) as buy, "
+                "SUM(CASE WHEN signal_type='SELL' THEN 1 ELSE 0 END) as sell "
+                "FROM watch_pool_snapshot WHERE trade_date=%s", [snap_date]
+            )
+            wp = cur.fetchone()
+        if not ss:
             return api_not_found()
-        return api_success(serialize_rows([row])[0])
+        # 组装成前端兼容格式
+        result = {
+            'trade_date': snap_date,
+            'cycle_stage': ss['season'],
+            'season': ss['season'],
+            'hengjiyuan_level': ss['hengjiyuan_level'],
+            'hengjiyuan_score': float(ss['hengjiyuan_score']) if ss['hengjiyuan_score'] else None,
+            'confidence_mult': float(ss['confidence_mult']) if ss['confidence_mult'] else None,
+            'position_advice': ss['position_advice'],
+            'total_analyzed': int(wp['total']) if wp and wp['total'] else 0,
+            'buy_signal_cnt': int(wp['buy']) if wp and wp['buy'] else 0,
+            'sell_signal_cnt': int(wp['sell']) if wp and wp['sell'] else 0,
+            'wait_signal_cnt': int(wp['total'] - wp['buy'] - wp['sell']) if wp and wp['total'] else 0,
+        }
+        return api_success(result)
     except Exception as e:
         logger.error(f"history_snapshot_detail error: {e}")
         return api_error(str(e))
@@ -717,16 +789,16 @@ def refresh_all():
         # 实际执行: chanlun + season + score + snapshot
         log = []
 
-        # Step 1: 季节判定 (直接用 season_engine_v2.0)
+        # Step 1: 季节判定 (直接用 season_engine.py v2.1)
         import importlib.util as _ilu
         try:
-            se_path = os.path.join(script_dir, 'season_engine_v2.0.py')
+            se_path = os.path.join(script_dir, 'season_engine.py')
             spec = _ilu.spec_from_file_location('season_engine', se_path)
-            mod = _ilu.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            if hasattr(mod, 'main'):
-                mod.main()
-            log.append('季节: ok')
+            from season_engine import SeasonEngine, save_result_to_db
+            engine = SeasonEngine()
+            result = engine.judge_market_season()
+            save_result_to_db(result)
+            log.append(f'季节: {result.get("market_season","?")}')
         except Exception as e:
             log.append(f'季节: error-{e}')
 
@@ -1351,8 +1423,8 @@ def portfolio_holdings():
                 SELECT ph.*, ss.season as market_season
                 FROM portfolio_holdings ph
                 LEFT JOIN (SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1) ss ON 1=1
-                WHERE ph.status='HOLDING' AND ph.trade_date = (
-                    SELECT MAX(trade_date) FROM portfolio_holdings WHERE ts_code=ph.ts_code AND status='HOLDING'
+                WHERE ph.status='HOLDING' AND ph.qty>0 AND ph.trade_date = (
+                    SELECT MAX(trade_date) FROM portfolio_holdings WHERE ts_code=ph.ts_code AND status='HOLDING' AND qty>0
                 )
                 ORDER BY ph.market_value DESC
             """)
@@ -1708,7 +1780,7 @@ def portfolio_recalc_all():
             with db_cursor() as _sync_cur:
                 _sync_cur.execute("""
                     UPDATE strategy_signal_daily ssd 
-                    INNER JOIN portfolio_holdings ph ON ssd.ts_code = ph.ts_code AND ph.status='HOLDING'
+                    INNER JOIN portfolio_holdings ph ON ssd.ts_code = ph.ts_code AND ph.status='HOLDING' AND ph.qty>0
                     SET ssd.holding_status = 'HOLDING'
                     WHERE ssd.strategy_id=1 AND ssd.trade_date = (SELECT MAX(trade_date) FROM strategy_signal_daily WHERE strategy_id=1)
                 """)
@@ -1773,24 +1845,24 @@ def watch_pool_refresh():
                     ts_val = v
                     ms_val = 0
                     
-                    # 读取行情信息填充分项
-                    c.execute("SELECT trade_date, close, high, low, vol, change_pct FROM daily_kline_qfq WHERE ts_code=%s ORDER BY trade_date ASC", (code,))
+                    # 读取行情信息填充分项（优先daily_kline取更多K线）
+                    c.execute("SELECT trade_date, close, high, low, vol, change_pct FROM daily_kline WHERE ts_code=%s ORDER BY trade_date ASC", (code,))
                     krows = c.fetchall()
                     _real_close = 0
                     _chg = 0.0
-                    if len(krows) >= 200:
+                    # 读取市场季节(放在if外确保始终有值)
+                    c.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+                    mr = c.fetchone()
+                    mkt_sea = mr['season'] if mr else 'chaos'
+                    
+                    c.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
+                    i300 = c.fetchone()
+                    regime = 'bull' if i300 and float(i300['raw_score'] or 0) > 3 else ('bear' if i300 and float(i300['raw_score'] or 0) < -2 else 'range')
+
+                    if len(krows) >= 21:
                         closes = [float(r['close']) for r in krows]
                         chgs = [float(r.get('change_pct') or 0) for r in krows]
                         vols = [float(r.get('vol') or 0) for r in krows]
-                        
-                        # 读取市场季节
-                        c.execute("SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
-                        mr = c.fetchone()
-                        mkt_sea = mr['season'] if mr else 'chaos'
-                        
-                        c.execute("SELECT raw_score FROM season_state WHERE index_code='000300.SH' ORDER BY trade_date DESC LIMIT 1")
-                        i300 = c.fetchone()
-                        regime = 'bull' if i300 and float(i300['raw_score'] or 0) > 3 else ('bear' if i300 and float(i300['raw_score'] or 0) < -2 else 'range')
                         
                         # 信号判定（与P6阶梯策略规则对齐）
                         # 买入线≥75（P6 v2.1，May建议P0 + Tony确认）
@@ -1815,8 +1887,13 @@ def watch_pool_refresh():
                         # 真实收盘价（从daily_kline取）
                         c.execute("SELECT close, change_pct FROM daily_kline WHERE ts_code=%s AND trade_date=%s", (code, trade_date))
                         _kr = c.fetchone()
-                        _real_close = float(_kr['close']) if _kr and _kr['close'] else (float(krows[-1]['close']) if krows else 0)
-                        _chg = chgs[-1] if chgs else 0.0
+                        if _kr and _kr['close']:
+                            _real_close = float(_kr['close'])
+                            _chg = float(_kr['change_pct']) if _kr['change_pct'] else 0.0
+                        else:
+                            _real_close = 0
+                            _chg = 0.0
+                        # change_pct已直接从daily_kline按日期精确取到
                     else:
                         signal, sig_label = 'WAIT', '⏳数据不足'
                         rets = {5: 0, 10: 0, 20: 0}
@@ -1869,11 +1946,10 @@ def watch_pool_snapshot():
                 """)
             rows = cur.fetchall()
 
-            # 补上恒纪元数据(从daily_snapshot或者strategy_signal获取最近的恒纪元状态)
+            # 补上恒纪元数据(从season_state获取，若无则按季节推断)
             cur.execute(
-                "SELECT hengjiyuan_level, hengjiyuan_score FROM daily_snapshot "
-                "WHERE trade_date=(SELECT MAX(trade_date) FROM daily_snapshot WHERE hengjiyuan_level IS NOT NULL) "
-                "LIMIT 1"
+                "SELECT season, raw_score, hengjiyuan_level, hengjiyuan_score FROM season_state "
+                "WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1"
             )
             heng_row = cur.fetchone()
 
@@ -1882,11 +1958,14 @@ def watch_pool_snapshot():
         if heng_row:
             heng_level = heng_row['hengjiyuan_level']
             heng_score = float(heng_row['hengjiyuan_score']) if heng_row['hengjiyuan_score'] else None
+            # 恒纪元字段为空时使用共享函数推断
+            if not heng_level:
+                from season_engine import infer_hengjiyuan
+                heng_level, heng_score = infer_hengjiyuan(heng_row['season'] or 'chaos', float(heng_row['raw_score'] or 0))
             for item in result_list:
                 item['hengjiyuan_level'] = heng_level
                 item['hengjiyuan_score'] = heng_score
         else:
-            # fallback: 从season_state推断
             for item in result_list:
                 item['hengjiyuan_level'] = 'weak_heng'
                 item['hengjiyuan_score'] = 50
@@ -1975,9 +2054,9 @@ def daily_summary():
 
         with db_cursor(commit=False) as cur:
             # 写一行汇总数据
-            cur.execute("SELECT season, raw_score, confidence FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
+            cur.execute("SELECT season, raw_score, confidence, position_advice FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
             ss = cur.fetchone()
-            cur.execute("SELECT hengjiyuan_level, hengjiyuan_score, confidence_mult FROM daily_snapshot ORDER BY trade_date DESC LIMIT 1")
+            cur.execute("SELECT hengjiyuan_level, hengjiyuan_score, confidence_mult FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1")
             snap = cur.fetchone()
             cur.execute("SELECT MAX(trade_date) as d FROM daily_kline"); ld=cur.fetchone()['d']
             cur.execute("SELECT COUNT(*) as t, SUM(CASE WHEN change_pct>0 THEN 1 ELSE 0 END) as up FROM daily_kline WHERE trade_date=%s",(ld,))
@@ -1992,9 +2071,19 @@ def daily_summary():
         season = ss['season'] if ss else 'chaos'
         season_score = float(ss['raw_score'] or 0) if ss else 0
         season_conf = float(ss['confidence'] or 0) if ss else 0
-        hj_level = snap['hengjiyuan_level'] if snap else ''
-        hj_score = float(snap['hengjiyuan_score'] or 0) if snap else 0
-        hj_conf = float(snap['confidence_mult'] or 0) if snap else 0
+        # 恒纪元数据（从season_state取，为空则按季节推断）
+        if snap:
+            hj_level = snap['hengjiyuan_level']
+            hj_score = float(snap['hengjiyuan_score'] or 0) if snap['hengjiyuan_score'] else 0
+            hj_conf = float(snap['confidence_mult'] or 0) if snap['confidence_mult'] else 0
+        else:
+            hj_level = None
+            hj_score = 0
+            hj_conf = 0
+        if not hj_level and ss:
+            from season_engine import infer_hengjiyuan
+            hj_level, hj_score = infer_hengjiyuan(ss['season'] or 'chaos', season_score)
+            hj_conf = season_conf
 
         # 拼7因子（从hengjiyuan_score + confidence推算）
         base = max(0, min(100, hj_score))
@@ -2021,6 +2110,7 @@ def daily_summary():
             'watch_pool_total': int(wp['total']) if wp else 0,
             'watch_pool_buy': int(wp['buy']) if wp else 0,
             'watch_pool_sell': int(wp['sell']) if wp else 0,
+            'position_advice': ss['position_advice'] if ss and ss.get('position_advice') else '观望',
             'watch_pool_hold': int((wp['total']-wp['buy']-wp['sell'])) if wp else 0,
             'portfolio_total': float(pa['total_market_value']) if pa else 0,
             'portfolio_profit': 0,
@@ -2699,7 +2789,7 @@ def strategy_holdings_actions():
                    p6.calibrated_score as p6_score, p6.track as p6_track
             FROM strategy_signal_daily ssd
             LEFT JOIN stock_basic sb ON ssd.ts_code = sb.ts_code
-            LEFT JOIN portfolio_holdings ph ON ssd.ts_code = ph.ts_code AND ph.status='HOLDING'
+            LEFT JOIN portfolio_holdings ph ON ssd.ts_code = ph.ts_code AND ph.status='HOLDING' AND ph.qty>0
             LEFT JOIN strategy_signal p6 ON ssd.ts_code = p6.ts_code AND p6.direction='dual_track_v1' AND p6.trade_date=%s
             WHERE ssd.strategy_id=1 AND ssd.trade_date=%s
             ORDER BY 

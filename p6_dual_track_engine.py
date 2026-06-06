@@ -623,23 +623,92 @@ def daily_pipeline(mode: str = 'watch_pool'):
     saved, skipped = 0, 0
     for i, r in enumerate(results):
         try:
+            code = r['ts_code']
+            
+            # 从 chanlun_structure 读取缠论买卖点（当日最新）
+            cur.execute("""
+                SELECT buy_sell_point, zoushi_type, beichi_type, structure_score,
+                       autumn_tiger, tiger_confidence
+                FROM chanlun_structure
+                WHERE ts_code=%s AND trade_date=%s
+                ORDER BY trade_date DESC LIMIT 1
+            """, (code, ctx.trade_date))
+            cl = cur.fetchone()
+            
+            bs = (cl['buy_sell_point'] or 'none') if cl else 'none'
+            zt = (cl['zoushi_type'] or '未知') if cl else '未知'
+            ss = float(cl['structure_score'] or 0) if cl else 0
+            autumn = 1 if (cl and cl['autumn_tiger']) else 0
+            tiger_conf = float(cl['tiger_confidence'] or 0) if cl else 0
+            
+            # 计算 operation_mode
+            calib = float(r['calibrated_score'] or 0)
+            if calib >= 75:
+                op_mode = 'attack'
+            elif calib >= 60:
+                op_mode = 'normal'
+            elif calib >= 40:
+                op_mode = 'defense'
+            else:
+                op_mode = 'dormant'
+            
+            # 计算 signal_confidence
+            if calib >= 80:
+                sig_conf = 'high'
+            elif calib >= 60:
+                sig_conf = 'medium'
+            else:
+                sig_conf = 'low'
+            
+            # 构建 reason_chain
+            track_label = '动量' if r['track'] == 'momentum' else '回归'
+            reason_parts = [
+                f"{ctx.season}+{ctx.regime}",
+                f"{track_label}轨道",
+            ]
+            if bs and bs != 'none':
+                reason_parts.append(f"{bs}确认")
+            if zt and zt not in ('unknown', '未知'):
+                reason_parts.append(zt)
+            if ss >= 80:
+                reason_parts.append('结构强势')
+            elif ss >= 60:
+                reason_parts.append('结构稳定')
+            if autumn:
+                reason_parts.append('秋老虎')
+            reason = '+'.join(reason_parts)
+            
             cur.execute("""
                 INSERT INTO strategy_signal 
-                    (ts_code, trade_date, track, composite_score, calibrated_score, 
-                     scoring_strategy, direction)
-                VALUES (%s, %s, %s, %s, %s, %s, 'dual_track_v1')
+                    (ts_code, trade_date, track, composite_score, calibrated_score,
+                     scoring_strategy, direction, operation_mode, buy_sell_point,
+                     reason_chain, signal_confidence, autumn_tiger, tiger_confidence,
+                     hengjiyuan_level)
+                VALUES (%s, %s, %s, %s, %s, %s, 'dual_track_v1', %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     track=VALUES(track), composite_score=VALUES(composite_score),
                     calibrated_score=VALUES(calibrated_score),
-                    scoring_strategy=VALUES(scoring_strategy)
-            """, (r['ts_code'], ctx.trade_date, r['track'],
+                    scoring_strategy=VALUES(scoring_strategy),
+                    operation_mode=VALUES(operation_mode),
+                    buy_sell_point=VALUES(buy_sell_point),
+                    reason_chain=VALUES(reason_chain),
+                    signal_confidence=VALUES(signal_confidence),
+                    autumn_tiger=VALUES(autumn_tiger),
+                    tiger_confidence=VALUES(tiger_confidence),
+                    hengjiyuan_level=VALUES(hengjiyuan_level)
+            """, (code, ctx.trade_date, r['track'],
                   r['score'], r['calibrated_score'],
-                  'momentum' if r['track'] == 'momentum' else 'reversion'))
+                  'momentum' if r['track'] == 'momentum' else 'reversion',
+                  op_mode, bs, reason, sig_conf,
+                  autumn, tiger_conf,
+                  ctx.raw.get('hengjiyuan_level', 'weak_heng')))
             saved += 1
             if (i+1) % 50 == 0:
                 print(f"  💾 已入库 {i+1}/{tot}")
-        except Exception:
+        except Exception as e:
             skipped += 1
+            if skipped <= 3:
+                print(f"  ⚠️ 跳过 {r['ts_code']}: {e}")
     
     conn.commit()
     cur.close()
