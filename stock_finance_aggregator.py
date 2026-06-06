@@ -12,12 +12,22 @@ stock_finance_aggregator.py — 个股深度分析数据聚合层
   income / balancesheet / cashflow / fina_indicator
   dividend / forecast / daily_basic / stk_factor / moneyflow
 """
-import os, sys, time, json, functools, logging
+import os, sys, time, json, functools, logging, math
 from datetime import datetime, date, timedelta
 from typing import Optional
 
 import tushare as ts
 import pandas as pd
+
+
+def _sf(v, scale=1):
+    """safe_float: 处理NaN/None,返回float或0"""
+    if scale is None: scale = 1
+    try:
+        val = float(v) if v is not None else 0
+        return 0 if math.isnan(val) else round(val / scale, 2)
+    except (ValueError, TypeError):
+        return 0
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db_config import get_connection
@@ -28,7 +38,7 @@ logger = logging.getLogger('stock_aggregator')
 
 # ─── 全局配置 ────────────────────────────────────────────────
 DATA_ERROR_MARKER = -1
-MAX_RETRIES = 3
+MAX_RETRIES = 0
 RETRY_WAIT = 15        # 秒
 
 # 缓存 TTL（秒）
@@ -226,8 +236,8 @@ def get_stock_finance_overview(ts_code: str) -> dict:
             yearly_roe = df_sorted.drop_duplicates(subset=['end_date']).head(20)
             result['roe_trend'] = [
                 {'end_date': str(r['end_date']),
-                 'roe': float(r.get('roe', 0) or 0),
-                 'eps': float(r.get('eps', 0) or 0)}
+                 'roe': _sf(r.get('roe', 0) or 0),
+                 'eps': _sf(r.get('eps', 0) or 0)}
                 for _, r in yearly_roe.iterrows()
             ]
 
@@ -245,9 +255,9 @@ def get_stock_finance_overview(ts_code: str) -> dict:
                     seen_dates.add(ed)
                     result['annual_trend'].append({
                         'end_date': ed,
-                        'revenue': float(r.get('revenue', 0) or 0) / 1e8,
-                        'n_income': float(r.get('n_income', 0) or 0) / 1e8,
-                        'operate_profit': float(r.get('operate_profit', 0) or 0) / 1e8,
+                        'revenue': _sf(r.get('revenue', 0) or 0) / 1e8,
+                        'n_income': _sf(r.get('n_income', 0) or 0) / 1e8,
+                        'operate_profit': _sf(r.get('operate_profit', 0) or 0) / 1e8,
                         'report_type': str(r.get('report_type', '')),
                     })
                     if len(result['annual_trend']) >= 8:  # 最多8期
@@ -267,9 +277,9 @@ def get_stock_finance_overview(ts_code: str) -> dict:
                     seen_bs.add(ed)
                     entry = {
                         'end_date': ed,
-                        'total_assets': float(r.get('total_assets', 0) or 0) / 1e8,
-                        'total_liab': float(r.get('total_liab', 0) or 0) / 1e8,
-                        'total_hldr_eqy_excl_min_int': float(r.get('total_hldr_eqy_excl_min_int', 0) or 0) / 1e8,
+                        'total_assets': _sf(r.get('total_assets', 0) or 0) / 1e8,
+                        'total_liab': _sf(r.get('total_liab', 0) or 0) / 1e8,
+                        'total_hldr_eqy_excl_min_int': _sf(r.get('total_hldr_eqy_excl_min_int', 0) or 0) / 1e8,
                     }
                     result['capital_structure'].append(entry)
                     if len(result['capital_structure']) >= 4:
@@ -289,10 +299,10 @@ def get_stock_finance_overview(ts_code: str) -> dict:
                     seen_cf.add(ed)
                     result['cashflow'].append({
                         'end_date': ed,
-                        'n_cashflow_act': float(r.get('n_cashflow_act', 0) or 0) / 1e8,
-                        'n_cashflow_inv': float(r.get('n_cashflow_inv', 0) or 0) / 1e8,
-                        'n_cashflow_fin': float(r.get('n_cashflow_fin', 0) or 0) / 1e8,
-                        'free_cashflow': float(r.get('free_cashflow', 0) or 0) / 1e8,
+                        'n_cashflow_act': _sf(r.get('n_cashflow_act', 0) or 0) / 1e8,
+                        'n_cashflow_inv': _sf(r.get('n_cashflow_inv', 0) or 0) / 1e8,
+                        'n_cashflow_fin': _sf(r.get('n_cashflow_fin', 0) or 0) / 1e8,
+                        'free_cashflow': _sf(r.get('free_cashflow', 0) or 0) / 1e8,
                     })
                     if len(result['cashflow']) >= 4:
                         break
@@ -308,9 +318,9 @@ def get_stock_finance_overview(ts_code: str) -> dict:
                 result['dividend_records'].append({
                     'ex_date': str(r.get('ex_date', '')),
                     'pay_date': str(r.get('pay_date', '')),
-                    'dividend_per_share': float(r.get('dividend_per_share', 0) or 0),
+                    'dividend_per_share': _sf(r.get('dividend_per_share', 0) or 0),
                     'dividend_type': str(r.get('dividend_type', '')),
-                    'base_share': float(r.get('base_share', 0) or 0) / 1e8,
+                    'base_share': _sf(r.get('base_share', 0) or 0) / 1e8,
                 })
 
         # ── 7. 业绩预告 ──
@@ -324,10 +334,10 @@ def get_stock_finance_overview(ts_code: str) -> dict:
                     'end_date': str(r.get('end_date', '')),
                     'ann_date': str(r.get('ann_date', '')),
                     'type': str(r.get('type', '')),
-                    'p_change_min': float(r.get('p_change_min', 0) or 0) if r.get('p_change_min') else None,
-                    'p_change_max': float(r.get('p_change_max', 0) or 0) if r.get('p_change_max') else None,
-                    'net_profit_min': float(r.get('net_profit_min', 0) or 0) / 1e8,
-                    'net_profit_max': float(r.get('net_profit_max', 0) or 0) / 1e8,
+                    'p_change_min': _sf(r.get('p_change_min', 0) or 0) if r.get('p_change_min') else None,
+                    'p_change_max': _sf(r.get('p_change_max', 0) or 0) if r.get('p_change_max') else None,
+                    'net_profit_min': _sf(r.get('net_profit_min', 0) or 0) / 1e8,
+                    'net_profit_max': _sf(r.get('net_profit_max', 0) or 0) / 1e8,
                     'content': str(r.get('content', '')),
                 }
                 for _, r in df_fc.head(5).iterrows()
@@ -407,9 +417,9 @@ def get_stock_factors(ts_code: str) -> dict:
             for _, r in df_factor.head(10).iterrows():
                 macd_data.append({
                     'trade_date': str(r['trade_date']),
-                    'macd': float(r.get('macd', 0) or 0),
-                    'macd_dea': float(r.get('macd_dea', 0) or 0),
-                    'macd_dif': float(r.get('macd_dif', 0) or 0),
+                    'macd': _sf(r.get('macd', 0) or 0),
+                    'macd_dea': _sf(r.get('macd_dea', 0) or 0),
+                    'macd_dif': _sf(r.get('macd_dif', 0) or 0),
                 })
             result['macd'] = {
                 'latest': macd_data[0] if macd_data else {},
@@ -421,9 +431,9 @@ def get_stock_factors(ts_code: str) -> dict:
             for _, r in df_factor.head(10).iterrows():
                 rsi_data.append({
                     'trade_date': str(r['trade_date']),
-                    'rsi_6': float(r.get('rsi_6', 0) or 0),
-                    'rsi_12': float(r.get('rsi_12', 0) or 0),
-                    'rsi_24': float(r.get('rsi_24', 0) or 0),
+                    'rsi_6': _sf(r.get('rsi_6', 0) or 0),
+                    'rsi_12': _sf(r.get('rsi_12', 0) or 0),
+                    'rsi_24': _sf(r.get('rsi_24', 0) or 0),
                 })
             result['rsi'] = {
                 'latest': rsi_data[0] if rsi_data else {},
@@ -435,9 +445,9 @@ def get_stock_factors(ts_code: str) -> dict:
             for _, r in df_factor.head(10).iterrows():
                 kdj_data.append({
                     'trade_date': str(r['trade_date']),
-                    'kdj_k': float(r.get('kdj_k', 0) or 0),
-                    'kdj_d': float(r.get('kdj_d', 0) or 0),
-                    'kdj_j': float(r.get('kdj_j', 0) or 0),
+                    'kdj_k': _sf(r.get('kdj_k', 0) or 0),
+                    'kdj_d': _sf(r.get('kdj_d', 0) or 0),
+                    'kdj_j': _sf(r.get('kdj_j', 0) or 0),
                 })
             result['kdj'] = {
                 'latest': kdj_data[0] if kdj_data else {},
@@ -465,16 +475,16 @@ def get_stock_factors(ts_code: str) -> dict:
             for _, r in df_mf.head(5).iterrows():
                 entry = {
                     'trade_date': str(r['trade_date']),
-                    'buy_sm_vol': float(r.get('buy_sm_vol', 0) or 0),
-                    'sell_sm_vol': float(r.get('sell_sm_vol', 0) or 0),
-                    'buy_md_vol': float(r.get('buy_md_vol', 0) or 0),
-                    'sell_md_vol': float(r.get('sell_md_vol', 0) or 0),
-                    'buy_lg_vol': float(r.get('buy_lg_vol', 0) or 0),
-                    'sell_lg_vol': float(r.get('sell_lg_vol', 0) or 0),
-                    'buy_elg_vol': float(r.get('buy_elg_vol', 0) or 0),
-                    'sell_elg_vol': float(r.get('sell_elg_vol', 0) or 0),
-                    'net_mf_vol': float(r.get('net_mf_vol', 0) or 0),
-                    'trade_count': float(r.get('trade_count', 0) or 0),
+                    'buy_sm_vol': _sf(r.get('buy_sm_vol', 0) or 0),
+                    'sell_sm_vol': _sf(r.get('sell_sm_vol', 0) or 0),
+                    'buy_md_vol': _sf(r.get('buy_md_vol', 0) or 0),
+                    'sell_md_vol': _sf(r.get('sell_md_vol', 0) or 0),
+                    'buy_lg_vol': _sf(r.get('buy_lg_vol', 0) or 0),
+                    'sell_lg_vol': _sf(r.get('sell_lg_vol', 0) or 0),
+                    'buy_elg_vol': _sf(r.get('buy_elg_vol', 0) or 0),
+                    'sell_elg_vol': _sf(r.get('sell_elg_vol', 0) or 0),
+                    'net_mf_vol': _sf(r.get('net_mf_vol', 0) or 0),
+                    'trade_count': _sf(r.get('trade_count', 0) or 0),
                 }
                 result['money_flow']['trend'].append(entry)
 

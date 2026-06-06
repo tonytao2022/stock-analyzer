@@ -42,8 +42,9 @@ td{padding:8px 10px;font-size:13px;border-bottom:1px solid var(--border)}
 <div class="stock-code" id="stockCode"></div>
 </div>
 <div class="grid-4" id="metricsGrid"></div>
-<div class="card"><div class="card-title">📈 财务趋势（近5年）</div><div class="chart-container" id="trendChart"></div></div>
-<div class="card"><div class="card-title">🏗️ 资本结构</div><div class="chart-container" id="structureChart"></div></div>
+<div class="card"><div class="card-title">📈 营收/净利润趋势（近5年）</div><div class="chart-container" id="trendChart"></div></div>
+<div class="card"><div class="card-title">📊 ROE趋势</div><div class="chart-container" id="roeChart" style="width:100%;height:260px"></div></div>
+<div class="card"><div class="card-title">🏗️ 资本结构（总资产/总负债）</div><div class="chart-container" id="structureChart"></div></div>
 <div class="card"><div class="card-title">💰 分红记录</div><div id="dividendTable"></div></div>
 </div>
 <div class="loading" id="loading">输入股票代码开始分析</div>
@@ -51,14 +52,28 @@ td{padding:8px 10px;font-size:13px;border-bottom:1px solid var(--border)}
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script>
 const API_BASE='/api/v1/management';
-function apiUrl(path){const key=localStorage.getItem('api_key');return API_BASE+path+(key?'?api_key='+key:'')}
+// 不依赖api_key，依赖nginx自动注入X-API-Key
+function apiGet(url){return fetch(url,{credentials:'same-origin'}).then(r=>r.json())}
 function loadStock(){const code=document.getElementById('searchInput').value.trim();if(!code)return;document.getElementById('loading').innerHTML='⏳ 加载中...';document.getElementById('mainContent').style.display='none';
-Promise.all([fetch(apiUrl('/stock/finance?ts_code='+code)).then(r=>r.json()),fetch(apiUrl('/stock/factors?ts_code='+code)).then(r=>r.json())]).then(([fin,fac])=>{
+// 确保api_key就绪
+fetch(API_BASE+'/system/config').then(r=>r.json()).then(d=>{if(d.code===0&&d.data&&d.data.configs){const c=d.data.configs.find(x=>x.config_key==='api_key');if(c){localStorage.setItem('api_key',c.config_value);}}}).catch(()=>{});Promise.all([apiGet(API_BASE+'/stock/finance?ts_code='+code),apiGet(API_BASE+'/stock/factors?ts_code='+code)]).then(([fin,fac]) => {
 if(fin.code!==0||!fin.data){document.getElementById('loading').innerHTML='<div class="error">加载失败: '+(fin.error||'未知错误')+'</div>';return}
 renderFinance(fin.data);document.getElementById('loading').style.display='none';document.getElementById('mainContent').style.display='block';}).catch(e=>{document.getElementById('loading').innerHTML='<div class="error">请求失败: '+e.message+'</div>';});}
-function renderFinance(data){const fin=data.financials||[];const km=data.key_metrics||{};document.getElementById('stockName').textContent=data.name||'--';document.getElementById('stockCode').textContent=data.ts_code||''
-const metrics=[{label:'ROE',val:km.roe?km.roe.toFixed(1)+'%':'--',color:'var(--color-safety)'},{label:'毛利率',val:km.gross_profit_margin?km.gross_profit_margin.toFixed(1)+'%':'--',color:'var(--color-primary)'},{label:'资产负债率',val:km.debt_to_assets?km.debt_to_assets.toFixed(1)+'%':'--',color:km.debt_to_assets>70?'var(--color-error)':'var(--color-warning)'},{label:'每股收益',val:km.eps?km.eps.toFixed(2):'--',color:'var(--text-bright)'}]
-document.getElementById('metricsGrid').innerHTML=metrics.map(m=>'<div class="metric-card"><div class="metric-label">'+m.label+'</div><div class="metric-value" style="color:'+m.color+'">'+m.val+'</div></div>').join('')
+function renderFinance(data){
+const fin=data.annual_trend||data.financials||[];
+const km=data.latest_indicators||data.key_metrics||{};
+var name=data.name;if(!name||name==='--'){try{name=data.ts_code||'--';if(name.length>6){name=name.substring(0,6);}}catch(e){name='--'}}
+document.getElementById('stockName').textContent=(data.stock_name||name||'--')+' ('+(data.ts_code||'')+')';
+document.getElementById('stockCode').textContent='';
+const metItems=[
+  {label:'ROE',val:km.roe!==undefined?km.roe.toFixed(1)+'%':'--',color:km.roe>20?'var(--color-safety)':km.roe>10?'var(--color-primary)':'var(--text-bright)'},
+  {label:'毛利率',val:km.gross_profit_margin!==undefined?km.gross_profit_margin.toFixed(1)+'%':(km.gross_margin!==undefined?km.gross_margin.toFixed(1)+'%':'--'),color:km.gross_profit_margin>30?'var(--color-safety)':'var(--color-primary)'},
+  {label:'资产负债率',val:km.debt_to_assets!==undefined?km.debt_to_assets.toFixed(1)+'%':'--',color:km.debt_to_assets>70?'var(--color-error)':km.debt_to_assets>50?'var(--color-warning)':'var(--color-safety)'},
+  {label:'每股收益',val:km.eps!==undefined?km.eps.toFixed(2):'--',color:'var(--text-bright)'},
+  {label:'每股净资产',val:km.bps!==undefined?km.bps.toFixed(2):'--',color:'var(--text-muted)',small:true},
+  {label:'ROA',val:km.roa!==undefined?km.roa.toFixed(1)+'%':'--',color:'var(--text-muted)',small:true}
+]
+document.getElementById('metricsGrid').innerHTML=metItems.map(m=>'<div class="metric-card"><div class="metric-label">'+m.label+'</div><div class="metric-value" style="color:'+m.color+'">'+m.val+'</div></div>').join('')
 if(fin.length){const rev=new echarts.init(document.getElementById('trendChart'));
 const labels=fin.map(f=>f.end_date.substring(0,7)).reverse()
 const revenues=fin.map(f=>Math.round(f.revenue/100000000)).reverse()
@@ -70,5 +85,5 @@ const sl=fin.filter(f=>f.total_assets).map(f=>f.end_date.substring(0,7)).reverse
 const assets=fin.filter(f=>f.total_assets).map(f=>Math.round(f.total_assets/100000000)).reverse()
 const liabs=fin.filter(f=>f.total_assets).map(f=>Math.round(f.total_liab/100000000)).reverse()
 struc.setOption({tooltip:{trigger:'axis'},legend:{data:['总资产(亿)','总负债(亿)'],textStyle:{color:'#94a3b8'}},grid:{left:60,right:20,bottom:30,top:40},xAxis:{type:'category',data:sl,axisLabel:{color:'#64748b'}},yAxis:{type:'value',name:'亿',axisLabel:{color:'#64748b'}},series:[{name:'总资产(亿)',type:'bar',data:assets,itemStyle:{color:'#3b82f6'}},{name:'总负债(亿)',type:'bar',data:liabs,itemStyle:{color:'#f59e0b'}}]})}
-const divs=data.dividends||[];document.getElementById('dividendTable').innerHTML=divs.length?'<table><tr><th>报告期</th><th>现金分红(元/股)</th><th>送股(股)</th><th>转增(股)</th><th>股权登记日</th><th>除权日</th></tr>'+divs.slice(0,15).map(d=>'<tr><td>'+d.end_date.substring(0,7)+'</td><td>'+(d.cash_div||'--')+'</td><td>'+(d.stk_div||'--')+'</td><td>'+(d.stk_bo_rate||'--')+'</td><td>'+(d.record_date||'--')+'</td><td>'+(d.ex_date||'--')+'</td></tr>').join('')+'</table>':'<div style="color:var(--text-muted);padding:12px">暂无分红数据</div>'}
+const divs=data.dividend_records||data.dividends||[];document.getElementById('dividendTable').innerHTML=divs.length?'<table><tr><th>报告期</th><th>现金分红(元/股)</th><th>送股(股)</th><th>转增(股)</th><th>股权登记日</th><th>除权日</th></tr>'+divs.slice(0,15).map(d=>'<tr><td>'+d.end_date.substring(0,7)+'</td><td>'+(d.cash_div||'--')+'</td><td>'+(d.stk_div||'--')+'</td><td>'+(d.stk_bo_rate||'--')+'</td><td>'+(d.record_date||'--')+'</td><td>'+(d.ex_date||'--')+'</td></tr>').join('')+'</table>':'<div style="color:var(--text-muted);padding:12px">暂无分红数据</div>'}
 loadStock();</script></body></html>
