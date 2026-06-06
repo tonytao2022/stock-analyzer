@@ -3407,14 +3407,14 @@ def sector_rotation_top():
 
             # 从 sector_chanlun_cache 获取最新日期的所有行业数据
             cur.execute("""
-                SELECT cc.*, sc.score as rotation_score,
-                       sc.chanlun_score, sc.cycle_score, sc.momentum_score,
-                       sc.signal, sc.signal_label, sc.rank_change
+                SELECT cc.*, sc.composite_score as rotation_score,
+                       sc.chanlun_score, sc.season_score, sc.money_score,
+                       sc.advice as `signal`, NULL as signal_label, sc.rank_change_c as rank_change
                 FROM sector_chanlun_cache cc
                 LEFT JOIN sector_rotation_score sc ON cc.ts_code = sc.ts_code
                     AND sc.trade_date = (SELECT MAX(trade_date) FROM sector_rotation_score)
                 WHERE cc.trade_date = (SELECT MAX(trade_date) FROM sector_chanlun_cache)
-                ORDER BY COALESCE(sc.score, cc.structure_score, 50) DESC
+                ORDER BY COALESCE(sc.composite_score, cc.structure_score, 50) DESC
                 LIMIT %s
             """, (limit,))
             rows = cur.fetchall()
