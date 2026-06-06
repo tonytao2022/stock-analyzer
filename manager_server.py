@@ -3412,39 +3412,41 @@ def sector_rotation_top():
                        sc.advice as `signal`, NULL as signal_label, sc.rank_change_c as rank_change
                 FROM sector_chanlun_cache cc
                 LEFT JOIN sector_rotation_score sc ON cc.ts_code = sc.ts_code
-                    AND sc.trade_date = (SELECT MAX(trade_date) FROM sector_rotation_score)
+                    AND (sc.trade_date = (SELECT MAX(trade_date) FROM sector_rotation_score) OR sc.trade_date IS NULL)
                 WHERE cc.trade_date = (SELECT MAX(trade_date) FROM sector_chanlun_cache)
                 ORDER BY COALESCE(sc.composite_score, cc.structure_score, 50) DESC
                 LIMIT %s
             """, (limit,))
             rows = cur.fetchall()
+            
+            print(f"[api] sector_rotation_top: found {len(rows)} rows from cache_date={_td}")
 
             result = []
             for r in rows:
                 entry = {
                     'ts_code': r['ts_code'],
-                    'sector_name': r['sector_name'],
+                    'sector_name': '',
                     'trade_date': str(r['trade_date']),
-                    'analysis_level': r['analysis_level'],
-                    'structure_score': float(r['structure_score'] or 50),
-                    'score': float(r['rotation_score'] or r['structure_score'] or 50),
-                    'composite_score': float(r['rotation_score'] or r['structure_score'] or 50),
-                    'chanlun_score': float(r['chanlun_score'] or r['structure_score'] or 50),
-                    'cycle_score': float(r['cycle_score'] or 0),
-                    'momentum_score': float(r['momentum_score'] or 0),
+                    'analysis_level': 'L1',
+                    'structure_score': float(r.get('structure_score') or 50),
+                    'score': float(r.get('rotation_score') or r.get('structure_score') or 50),
+                    'composite_score': float(r.get('rotation_score') or r.get('structure_score') or 50),
+                    'chanlun_score': float(r.get('chanlun_score') or r.get('structure_score') or 50),
+                    'season_score': float(r.get('season_score') or 0),
+                    'money_score': float(r.get('money_score') or 0),
                     'signal': r.get('signal') or self_signal_from_chanlun(r),
                     'signal_label': r.get('signal_label') or '',
-                    'rank_change': r.get('rank_change') or 'SAME',
-                    'bi_direction': r['bi_direction'],
-                    'bi_count': r['bi_count'],
-                    'zhongshu_count': r['zhongshu_count'],
-                    'zoushi_type': r['zoushi_type'],
-                    'zoushi_stage': r['zoushi_stage'],
-                    'beichi_type': r['beichi_type'],
-                    'beichi_strength': float(r['beichi_strength'] or 0),
-                    'buy_sell_point': r['buy_sell_point'],
-                    'top_fractal_cnt': r['top_fractal_cnt'],
-                    'bottom_fractal_cnt': r['bottom_fractal_cnt'],
+                    'rank_change': r.get('rank_change') or 0,
+                    'bi_direction': r.get('bi_direction') or '',
+                    'bi_count': 0,
+                    'zhongshu_count': r.get('zhongshu_count') or 0,
+                    'zoushi_type': r.get('zoushi_type') or '',
+                    'zoushi_stage': '',
+                    'beichi_type': r.get('beichi_type') or '',
+                    'beichi_strength': float(r.get('beichi_strength') or 0),
+                    'buy_sell_point': r.get('buy_sell_point') or '',
+                    'top_fractal_cnt': 0,
+                    'bottom_fractal_cnt': 0,
                 }
                 result.append(entry)
 
