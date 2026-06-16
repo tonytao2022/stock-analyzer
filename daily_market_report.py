@@ -31,11 +31,16 @@ if not MYSQL_PASS:
 import pymysql
 
 def get_conn():
+    """连接stock_db_v2 (V2新系统)
+    
+    注意: 2026-06-16 从stock_db(V1)切换到stock_db_v2(V2)
+    原因: V2评分引擎全量写入stock_db_v2, V1的strategy_signal已无数据
+    """
     return pymysql.connect(
         host="127.0.0.1",
         user="debian-sys-maint",
         password=MYSQL_PASS,
-        database="stock_db",
+        database="stock_db_v2",
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
     )
@@ -68,11 +73,11 @@ def fetch_holdings():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT ts_code, name, qty, cost_price, current_price,
-                       profit_pct, market_value, profit_amount, advice,
-                       buy_date, lock_active, lock_until, stop_line
+                SELECT ts_code, name, shares as qty, cost_price, current_price,
+                       profit_pct, market_value, profit_amount,
+                       buy_date, status, notes, updated_at
                 FROM portfolio_holdings
-                WHERE status='HOLDING'
+                WHERE status='hold'
                 ORDER BY buy_date
             """)
             rows = cur.fetchall()
@@ -302,7 +307,7 @@ def generate_html(season, holdings, top_signals, watch_top, gainers, index_trend
             <td style="padding:6px 10px">{row['trade_date'].strftime('%m-%d')}</td>
             <td style="padding:6px 10px">{season_cn_map.get(row.get('season',''), row.get('season','—'))}</td>
             <td style="padding:6px 10px;text-align:right">{fmt(row.get('raw_score'),1)}</td>
-            <td style="padding:6px 10px;font-size:12px">{row.get('position_advice','—')[:30]}</td>
+            <td style="padding:6px 10px;font-size:12px">{(row.get('position_advice') or '—')[:30]}</td>
         </tr>"""
 
     # 持仓行
@@ -318,7 +323,7 @@ def generate_html(season, holdings, top_signals, watch_top, gainers, index_trend
         else:
             badge = "⚪"
             pct_class = ""
-        lock_badge = "🔒" if h.get("lock_active") else ""
+        lock_badge = "🔒" if h.get("status")=="hold" else ""
         holdings_rows += f"""
         <tr>
             <td style="padding:8px 10px"><strong>{h['name']}</strong><br><span style="font-size:11px;color:#999">{h['ts_code'][:8]}</span></td>
@@ -391,7 +396,7 @@ def generate_html(season, holdings, top_signals, watch_top, gainers, index_trend
     # 行业板块涨幅 Top
     gainer_rows = ""
     for i, g in enumerate(gainers, 1):
-        chg = float(g["avg_chg_pct"])
+        chg = float(g["avg_chg_pct"] or 0)
         chg_class = "up" if chg > 0 else "down"
         gainer_rows += f"""
         <tr>
