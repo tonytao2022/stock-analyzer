@@ -902,7 +902,7 @@ async function loadPortfolioManage(filterCode, filterStatus){
         +'<td>'+op+'</td>'
         +'<td>'
         +(canOperate
-          ? '<div style="display:flex;gap:4px;flex-wrap:wrap"><button onclick="showHoldingDialog('+(h.id||0)+',\''+h.ts_code+'\',\''+(h.name||'')+'\',\''+(h.trade_date||'')+'\',\''+(h.buy_date||h.trade_date||'')+'\','+(h.qty||0)+','+(h.cost_price||0)+','+(h.current_price||0)+')" style="background:transparent;color:var(--color-hold);border:1px solid var(--color-hold);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">📝 编辑</button><button onclick="if(confirm(\'确认删除 '+h.ts_code+'?\'))deleteHolding('+(h.id||0)+',\''+h.ts_code+'\')" style="background:transparent;color:var(--color-error);border:1px solid var(--color-error);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">🗑️ 删除</button></div>'
+          ? '<div style="display:flex;gap:4px;flex-wrap:wrap"><button onclick="showHoldingDialog('+(h.id||0)+',\''+h.ts_code+'\',\''+(h.name||'')+'\',\''+(h.trade_date||'')+'\',\''+(h.buy_date||h.trade_date||'')+'\','+(h.qty||0)+','+(h.cost_price||0)+','+(h.current_price||0)+','+(h.avail_qty||0)+')" style="background:transparent;color:var(--color-hold);border:1px solid var(--color-hold);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">📝 编辑</button><button onclick="if(confirm(\'确认删除 '+h.ts_code+'?\'))deleteHolding('+(h.id||0)+',\''+h.ts_code+'\')" style="background:transparent;color:var(--color-error);border:1px solid var(--color-error);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;cursor:pointer">🗑️ 删除</button></div>'
           : '<div style="display:flex;gap:4px"><span style="font-size:10px;color:var(--text-muted)">🔒 锁仓中</span><button onclick="promptUnlock(\''+h.ts_code+'\',\''+(h.name||'')+'\')" style="background:transparent;color:var(--color-error);border:1px solid var(--color-error);border-radius:var(--radius-sm);padding:2px 6px;font-size:10px;cursor:pointer">🔓 解锁</button></div>'
         )
         +'</td>'
@@ -1844,7 +1844,7 @@ async function unlockStock(tsCode, reason, name){
 
 // ═══ 持股增删改弹窗 ═══
 // 显示编辑/新增弹窗
-function showHoldingDialog(id, tsCode, name, tradeDate, buyDate, qty, costPrice, currentPrice) {
+function showHoldingDialog(id, tsCode, name, tradeDate, buyDate, qty, costPrice, currentPrice, availQty) {
   const isNew = !id || id === 0;
   const title = isNew ? '📝 新增持股' : '📝 编辑持股';
   const d = new Date().toISOString().split('T')[0];
@@ -1862,6 +1862,8 @@ function showHoldingDialog(id, tsCode, name, tradeDate, buyDate, qty, costPrice,
     + '<input id="hdlg_name" value="'+(name||'')+'" class="form-control" style="width:100%" '+(isNew?'':'readonly')+'></div>'
     + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">数量(股)</label>'
     + '<input id="hdlg_qty" type="number" value="'+(qty||'0')+'" class="form-control" style="width:100%"></div>'
+    + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">可用(股)</label>'
+    + '<input id="hdlg_avail" type="number" value="'+(availQty||qty||'0')+'" class="form-control" style="width:100%"></div>'
     + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">成本价</label>'
     + '<input id="hdlg_cost" type="number" step="0.001" value="'+(costPrice||'0')+'" class="form-control" style="width:100%"></div>'
     + '<div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">当前价</label>'
@@ -1923,8 +1925,10 @@ async function submitEditHolding(id) {
   const costPrice = parseFloat(document.getElementById('hdlg_cost')?.value) || 0;
   const currentPrice = parseFloat(document.getElementById('hdlg_price')?.value) || 0;
   const buyDate = document.getElementById('hdlg_date')?.value || '';
+  const availQty = parseInt(document.getElementById('hdlg_avail')?.value) || 0;
   const body = {};
   if (qty > 0) body.qty = qty;
+  if (availQty >= 0) body.avail_qty = availQty;
   if (costPrice > 0) body.cost_price = costPrice;
   if (currentPrice > 0) body.current_price = currentPrice;
   if (buyDate) { body.buy_date = buyDate; body.trade_date = buyDate; }

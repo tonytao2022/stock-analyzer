@@ -184,6 +184,7 @@ def get_stock_finance_overview(ts_code: str) -> dict:
 
     result = {
         'ts_code': ts_code,
+        'stock_name': '',
         'query_time': today_str,
         'basic_info': {},                # PE/PB/总市值
         'latest_indicators': {},         # 最新ROE/毛利率/资产负债率/每股收益
@@ -193,6 +194,26 @@ def get_stock_finance_overview(ts_code: str) -> dict:
         'forecast_list': [],             # 业绩预告
         'error': None,
     }
+    
+    # ── 0. 查询股票名称 ──
+    try:
+        import pymysql
+        conn = pymysql.connect(
+            host='127.0.0.1', port=3306,
+            user='debian-sys-maint',
+            password='iXve1rVBXfdA4tL9',
+            database='stock_db_v2',
+            charset='utf8mb4'
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM stock_basic WHERE ts_code=%s LIMIT 1", (ts_code,))
+        row = cur.fetchone()
+        if row:
+            result['stock_name'] = row[0]
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"查询股票名称失败({ts_code}): {e}")
 
     try:
         # ── 1. 每日指标（最新PE/PB/总市值） ──

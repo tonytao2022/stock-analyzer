@@ -40,7 +40,7 @@ def _get_db_config():
         'port': int(os.environ.get('DB_PORT', 3306)),
         'user': os.environ.get('DB_USER', 'debian-sys-maint'),
         'password': _get_password(),
-        'database': os.environ.get('DB_NAME', 'stock_db'),
+        'database': os.environ.get('DB_NAME', 'stock_db_v2'),
         'charset': 'utf8mb4',
         'connect_timeout': 5,
         'cursorclass': pymysql.cursors.DictCursor,

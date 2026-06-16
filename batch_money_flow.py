@@ -5,7 +5,7 @@
 从 Tushare moneyflow 拉取最新资金流向数据 → money_flow 表
 """
 import os, sys, time, pymysql, tushare as ts
-from db_config import get_connection
+from db_config import get_connection, get_user_id
 from datetime import datetime, date, timedelta
 
 def get_token():

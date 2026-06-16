@@ -79,7 +79,7 @@ def score_cycle_enhanced(
                     _pwd = _l.split('=')[-1].strip().strip('"').strip("'")
                     break
         _conn = pymysql.connect(host='127.0.0.1',port=3306,user='debian-sys-maint',
-            password=_pwd,database='stock_db',charset='utf8mb4')
+            password=_pwd,database='stock_db_v2',charset='utf8mb4')
         _cu = _conn.cursor()
         _cu.execute("""
             SELECT scoring_strategy FROM season_state 

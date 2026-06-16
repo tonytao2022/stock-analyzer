@@ -1098,7 +1098,7 @@ class SeasonEngine:
         pwd = os.environ.get('MYSQL_PASS', '')
         if not pwd:
             pwd = 'iXve1rVBXfdA4tL9'
-        self.db_config = db_config if db_config else {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':pwd,'database':'stock_db'}
+        self.db_config = db_config if db_config else {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':pwd,'database':'stock_db_v2'}
         self.use_market_breadth = use_market_breadth
         self.loader = DataLoader()
         self._prev_seasons: Dict[str, str] = {}  # 上一季的记忆(用于防横跳)
@@ -1139,7 +1139,8 @@ class SeasonEngine:
             # 先确定日期
             if target_date is None:
                 cur = self.loader.conn.cursor()
-                cur.execute("SELECT MAX(trade_date) FROM daily_kline WHERE ts_code='000300.SH'")
+                # 从监控池个股K线取最新交易日（指数数据Tushare免费账户可能不可用）
+                cur.execute("SELECT MAX(trade_date) FROM daily_kline")
                 target_date = cur.fetchone()[0]
                 cur.close()
 
@@ -1241,6 +1242,9 @@ class SeasonEngine:
         # 仓位建议
         position = self._get_position_advice(market_season, market_confidence)
 
+        # 恒纪元等级/评分（使用共享函数推断）
+        hj_level, hj_score = infer_hengjiyuan(market_season, market_raw)
+
         return {
             'trade_date': target_date.isoformat() if hasattr(target_date, 'isoformat') else str(target_date),
             'market_season': market_season,
@@ -1252,6 +1256,8 @@ class SeasonEngine:
             'season_votes': {s: round(v, 3) for s, v in season_votes.items()},
             'rule_chain': rule_chain,
             'position_advice': position,
+            'hengjiyuan_level': hj_level,
+            'hengjiyuan_score': hj_score,
         }
 
     def get_realtime_season(self) -> Dict:
@@ -1413,6 +1419,21 @@ class SeasonEngine:
 # 数据库持久化
 # ═══════════════════════════════════════════════════════════════
 
+def infer_hengjiyuan(season: str, raw_score: float) -> tuple:
+    """
+    根据季节和原始评分推断恒纪元等级和评分
+    用于 season_engine 返回结果和 manager_server 各接口的恒纪元数据补齐
+    输出: (hengjiyuan_level, hengjiyuan_score)
+    """
+    if season in ('summer', 'spring'):
+        level = 'strong_heng' if raw_score > 2 else 'weak_heng'
+    elif season in ('chaos', 'chaos_spring'):
+        level = 'weak_heng' if raw_score > 0 else 'weak_luan'
+    else:
+        level = 'weak_luan' if raw_score < -1 else 'strong_luan'
+    score = round(max(0, min(100, (raw_score + 10) * 5)), 1)
+    return (level, score)
+
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS season_state (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -1426,6 +1447,13 @@ CREATE TABLE IF NOT EXISTS season_state (
     rule_chain TEXT COMMENT '可解释规则链',
     position_advice VARCHAR(200) COMMENT '仓位建议',
     season_votes JSON COMMENT '各季节投票权重',
+    hengjiyuan_level VARCHAR(20) COMMENT '恒纪元等级 strong_heng/weak_heng/weak_luan/strong_luan',
+    hengjiyuan_score DECIMAL(5,2) COMMENT '恒纪元评分(0-100)',
+    confidence_mult DECIMAL(5,2) COMMENT '恒纪元置信度系数',
+    regime VARCHAR(10) COMMENT '市场状态 bull/bear/range',
+    regime_strength DECIMAL(5,3) COMMENT '状态强度',
+    chaos_subtype VARCHAR(20) COMMENT '混沌细分',
+    scoring_strategy VARCHAR(20) COMMENT '评分策略 momentum/reversion',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_date_code (trade_date, index_code),
     INDEX idx_date (trade_date),
@@ -1449,19 +1477,33 @@ def create_table_if_not_exists(db_config: dict = None):
 
 def save_result_to_db(result: Dict, db_config: dict = None):
     """保存单次判定结果到数据库"""
-    cfg = db_config or {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint'}
+    import os
+    if db_config is None:
+        pwd = os.environ.get('MYSQL_PASS', '') or 'iXve1rVBXfdA4tL9'
+        db_config = {'host':'127.0.0.1','port':3306,'user':'debian-sys-maint','password':pwd,'database':'stock_db_v2','charset':'utf8mb4'}
+    cfg = db_config
     conn = pymysql.connect(**cfg)
     cur = conn.cursor()
 
     # 全市场综合
+    hj_level, hj_score = (
+        (result.get('hengjiyuan_level'), result.get('hengjiyuan_score'))
+        if result.get('hengjiyuan_level')
+        else infer_hengjiyuan(result['market_season'], result['raw_score'])
+    )
+    hj_conf = result.get('market_confidence', 0)
     cur.execute("""
         INSERT INTO season_state (trade_date, index_code, season, raw_score, confidence,
-                                   rule_chain, position_advice, season_votes)
-        VALUES (%s, 'MARKET', %s, %s, %s, %s, %s, %s)
+                                   rule_chain, position_advice, season_votes,
+                                   hengjiyuan_level, hengjiyuan_score, confidence_mult)
+        VALUES (%s, 'MARKET', %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE season=VALUES(season), raw_score=VALUES(raw_score),
                                 confidence=VALUES(confidence), rule_chain=VALUES(rule_chain),
                                 position_advice=VALUES(position_advice),
-                                season_votes=VALUES(season_votes)
+                                season_votes=VALUES(season_votes),
+                                hengjiyuan_level=VALUES(hengjiyuan_level),
+                                hengjiyuan_score=VALUES(hengjiyuan_score),
+                                confidence_mult=VALUES(confidence_mult)
     """, (
         result['trade_date'],
         result['market_season'],
@@ -1470,6 +1512,9 @@ def save_result_to_db(result: Dict, db_config: dict = None):
         result['rule_chain'],
         result['position_advice'],
         json.dumps(result['season_votes'], ensure_ascii=False),
+        hj_level,
+        hj_score,
+        hj_conf,
     ))
 
     # 各指数明细
@@ -1563,23 +1608,8 @@ def main():
             if args.save:
                 total = len(results)
                 for i, r in enumerate(results):
-                    # 简化版保存（仅市场综合）
-                    from pymysql import connect
-                    conn = connect(**DB_CONFIG)
-                    cur = conn.cursor()
-                    d = r['trade_date']
-                    cur.execute("""
-                        INSERT INTO season_state (trade_date, index_code, season, raw_score,
-                                                   season_votes)
-                        VALUES (%s, 'MARKET', %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE season=VALUES(season),
-                                                raw_score=VALUES(raw_score),
-                                                season_votes=VALUES(season_votes)
-                    """, (d, r['season'], r['raw_score'], json.dumps(r.get('votes', {}), ensure_ascii=False)))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    if (i + 1) % 50 == 0:
+                    save_result_to_db(r)
+                    if (i + 1) % 100 == 0:
                         print(f"  💾 已保存 {i+1}/{total}")
                 print(f"✅ 回测结果已全部存入数据库")
 

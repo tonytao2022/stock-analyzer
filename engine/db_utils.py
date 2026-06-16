@@ -26,7 +26,7 @@ DB_CONFIG: Dict[str, object] = {
     'port': 3306,
     'user': 'debian-sys-maint',
     'password': _mysql_pass(),
-    'database': 'stock_db',
+    'database': 'stock_db_v2',
     'charset': 'utf8mb4',
 }
 

@@ -12,9 +12,10 @@ P6 分季评分双轨引擎 v1.0
   ┃   缠论趋势分×0.7 + 动量因子×0.3
   ┃   P3信号基於轨道排序
   ┗━ 轨道B: 均值回归评分 (秋季/冬季/混沌*)
-       缠论结构×0.4 + 超跌深度×0.3 + ATR波动×0.2 + 秋老虎+15分
+       缠论结构×0.40 + 超跌深度×0.25 + ATR波动×0.10 + 资金因子×0.15 + 秋老虎+10分
        P3信号基於轨道排序
 
+  V4: 动量权重从70/30改为50/25/25(缠论/动量/资金), 回归加入资金因子
   双轨排序: 动量轨道×1.3校准后合并排序 (Tony决策B)
   防跳变: 持有一天以上才能切换轨道 (Tony决策A)
   *混沌子态分配: 待MAY确认后补充
@@ -64,22 +65,125 @@ class MarketContext:
         """
         return 1.3 if self.is_momentum_track() else 1.0
 
+    def get_hs300_trend(self) -> float:
+        """获取沪深300近5日涨幅，判断大盘强度"""
+        try:
+            from db_config import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT close FROM daily_kline_qfq 
+                WHERE ts_code='000300.SH' AND trade_date <= %s
+                ORDER BY trade_date DESC LIMIT 5
+            """, (self.trade_date,))
+            rows = [float(r['close']) for r in cur.fetchall()]
+            cur.close(); conn.close()
+            if len(rows) >= 5:
+                return (rows[0] - rows[-1]) / rows[-1]
+            return 0.0
+        except:
+            return 0.0
+
 
 # ============================================================
 # 轨道A: 动量评分
 # ============================================================
 
+def _calc_vol_ratio(ts_code: str, trade_date: str) -> float:
+    """计算量比：当日vol / 前20日均vol"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT k.vol / NULLIF(ma.avg_vol, 0) as vol_ratio
+            FROM daily_kline_qfq k
+            JOIN (
+                SELECT AVG(vol) as avg_vol FROM daily_kline_qfq 
+                WHERE ts_code=%s AND trade_date < %s AND trade_date >= DATE_SUB(%s, INTERVAL 20 DAY)
+            ) ma ON 1=1
+            WHERE k.ts_code=%s AND k.trade_date=%s
+        """, (ts_code, trade_date, trade_date, ts_code, trade_date))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if row and row['vol_ratio'] is not None:
+            return float(row['vol_ratio'])
+    except:
+        pass
+    return 1.0
+
+
+def _calc_moneyflow_score(ts_code: str, trade_date: str) -> tuple:
+    """计算资金因子
+    查询 moneyflow 表（真实资金流向数据）
+    Returns:
+        (moneyflow_score, net_mf_amount, lg_ratio, vol_ratio)
+    """
+    try:
+        import pymysql
+        conn = get_connection()
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        # 近5日累计净流入 + 大单/特大单方向判断
+        cur.execute("""
+            SELECT
+                COALESCE(SUM(net_mf_amount), 0) as mf_5d,
+                COALESCE(SUM(buy_lg_amount - sell_lg_amount), 0) as lg_net_5d,
+                COALESCE(SUM(buy_elg_amount - sell_elg_amount), 0) as elg_net_5d
+            FROM moneyflow
+            WHERE ts_code=%s AND trade_date <= %s AND trade_date >= DATE_SUB(%s, INTERVAL 5 DAY)
+        """, (ts_code, trade_date, trade_date))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+
+        if row and row['mf_5d'] is not None:
+            mf_5d = float(row['mf_5d'])
+            lg_net = float(row['lg_net_5d'] or 0)
+            elg_net = float(row['elg_net_5d'] or 0)
+
+            # 净流入额评分 (万元)
+            if mf_5d > 10000:      # +1亿以上
+                mf_score = 85
+            elif mf_5d > 5000:     # +5000万~1亿
+                mf_score = 75
+            elif mf_5d > 0:        # 净流入但小于5000万
+                mf_score = 60
+            elif mf_5d > -5000:    # 净流出小于5000万
+                mf_score = 40
+            elif mf_5d > -10000:   # 净流出5000万~1亿
+                mf_score = 25
+            else:                   # 净流出1亿以上
+                mf_score = 15
+
+            # 大单/特大单方向修正
+            total_smart = lg_net + elg_net
+            if total_smart > 5000:       # 聪明钱大举流入
+                mf_score = min(100, mf_score + 15)
+            elif total_smart > 0:        # 聪明钱小幅流入
+                mf_score = min(100, mf_score + 5)
+            elif total_smart < -5000:    # 聪明钱大举出逃
+                mf_score = max(0, mf_score - 15)
+            elif total_smart < 0:        # 聪明钱小幅流出
+                mf_score = max(0, mf_score - 5)
+
+            # 大单/特大单比例（判断主力方向强度）
+            total_vol = abs(lg_net) + abs(elg_net) + 1  # 防0
+            smart_ratio = (lg_net + elg_net) / total_vol if total_vol > 0 else 0
+            return mf_score, mf_5d, smart_ratio
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        pass
+    return 50, 0, 0
+
+
 def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
     """
     动量轨道评分
-    权重: 缠论趋势分×0.7 + 动量因子×0.3
+    V4权重: 缠论趋势分×0.50 + 动量因子×0.25 + 资金因子×0.25
     
     Returns:
         {'track': 'momentum', 'score': float, 'details': {...}}
     """
     details = {'track': 'momentum'}
     
-    # 1. 从DB获取基础数据
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -104,7 +208,7 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
         
         latest = rows[0]
         
-        # 2. 读取缠论结构评分
+        # 读取缠论结构评分
         cur.execute("""
             SELECT structure_score, buy_sell_point, beichi_type, beichi_strength,
                    zoushi_type, zoushi_stage, autumn_tiger, tiger_confidence
@@ -112,10 +216,12 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
             WHERE ts_code=%s ORDER BY trade_date DESC LIMIT 1
         """, (ts_code,))
         cl_row = cur.fetchone()
-        cur.close()
+        cur.close(); conn.close()
         
-        # 3. 计算缠论趋势分 (核心因子, 70%)
-        trend_score = 50  # 默认
+        # ──────── 计算三个因子 ────────
+        
+        # 1. 缠论趋势分 (50%)
+        trend_score = 50
         if cl_row and cl_row.get('structure_score') is not None:
             ss = float(cl_row['structure_score'])
             if ss >= 75: trend_score = 85
@@ -123,19 +229,16 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
             elif ss >= 40: trend_score = 55
             else: trend_score = 35
             
-            # 买卖点加成
             bs = cl_row.get('buy_sell_point', 'none')
             bs_boost = {'buy3': 15, 'buy2': 8, 'buy1': 3, 'sell3': -15, 'sell2': -8, 'sell1': -3}.get(bs, 0)
             trend_score = max(0, min(100, trend_score + bs_boost))
             
-            # 背驰增强
             bt = cl_row.get('beichi_type', 'none')
             if bt == 'bottom' and float(cl_row.get('beichi_strength', 0) or 0) > 40:
                 trend_score = min(100, trend_score + 10)
             elif bt == 'top' and float(cl_row.get('beichi_strength', 0) or 0) > 40:
                 trend_score = max(0, trend_score - 10)
         else:
-            # 无缠论数据: 用MA位置代理
             close = float(latest['close'])
             ma20 = float(latest.get('ma20', 0) or 0)
             ma60 = float(latest.get('ma60', 0) or 0)
@@ -145,53 +248,41 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
                 elif close > ma60: trend_score = 45
                 else: trend_score = 35
         
-        # 4. 计算动量因子 (30%)
+        # 2. 动量因子 (25%)
         closes = [float(r['close']) for r in reversed(rows)]
         n = len(closes)
-        
-        # momentum的成分: 短期收益率 + RSI动量 + 加速确认
         momentum = 50
         if n >= 20:
-            # 5日/10日/20日涨幅
             r5 = (closes[-1] - closes[-6]) / closes[-6] if len(closes) >= 6 else 0
             r10 = (closes[-1] - closes[-11]) / closes[-11] if len(closes) >= 11 else 0
             r20 = (closes[-1] - closes[-21]) / closes[-21] if len(closes) >= 21 else 0
-            
-            # 连续上涨天数
             cons_up = 0
             for i in range(-5, 0):
-                if closes[i] > closes[i-1]:
-                    cons_up += 1
-                else:
-                    cons_up = 0
-            
-            # RSI动量
+                if closes[i] > closes[i-1]: cons_up += 1
+                else: cons_up = 0
             rsi_val = float(latest.get('rsi_14', 50) or 50)
             
-            # 动量综合计算
             score = 50
-            score += max(-15, min(15, r5 * 150))      # -15~+15
-            score += max(-10, min(10, r10 * 80))      # -10~+10
-            score += max(-8, min(8, r20 * 50))        # -8~+8
-            score += min(8, cons_up * 2)               # 0~+8（连续上涨确认）
-            score += (rsi_val - 50) * 0.5              # RSI修正 -25~+25
-            
-            # 量能确认: 放量上涨=真突破, 缩量上涨=警惕
-            vr = float(latest.get('volume_ratio', 1) or 1)
-            if r5 > 0.02 and vr > 1.5:
-                score += 5  # 放量上涨确认
-            elif r5 > 0.02 and vr < 0.7:
-                score -= 5  # 缩量上涨存疑
-            
+            score += max(-15, min(15, r5 * 150))
+            score += max(-10, min(10, r10 * 80))
+            score += max(-8, min(8, r20 * 50))
+            score += min(8, cons_up * 2)
+            score += (rsi_val - 50) * 0.5
             momentum = max(0, min(100, score))
         
-        # 5. 综合: 缠论趋势分×0.7 + 动量×0.3
-        final_score = trend_score * 0.70 + momentum * 0.30
-        final_score = max(0, min(100, round(final_score, 1)))
+        # 3. 资金因子 (25%)
+        mf_score, mf_5d, lg_r = _calc_moneyflow_score(ts_code, ctx.trade_date)
         
         details['chanlun_trend'] = trend_score
         details['momentum_raw'] = momentum
+        details['mf_score'] = mf_score
+        details['mf_5d'] = round(mf_5d, 0)
+        details['lg_ratio'] = round(lg_r, 4)
         details['chanlun_row'] = bool(cl_row)
+        
+        # 4. 综合：缠论×0.50 + 动量×0.25 + 资金×0.25
+        final_score = trend_score * 0.50 + momentum * 0.25 + mf_score * 0.25
+        final_score = max(0, min(100, round(final_score, 1)))
         
         return {'track': 'momentum', 'score': final_score, 'details': details}
         
@@ -378,18 +469,27 @@ def track_reversion(ts_code: str, ctx: MarketContext) -> Dict:
             
             details['atr_pct'] = round(atr_pct, 4)
         
-        # ===== 综合 =====
-        final_score = structure * 0.40 + oversold * 0.30 + volatility * 0.20
+        # ===== 因子4: 资金因子 (15%) =====
+        mf_score, mf_5d, lg_r = _calc_moneyflow_score(ts_code, ctx.trade_date)
+        details['mf_score'] = mf_score
+        details['mf_5d'] = round(mf_5d, 0)
+        details['lg_ratio'] = round(lg_r, 4)
         
-        # 秋老虎: 已经在structure中加了15分
-        # 加上情绪辅助(微调, L3区分度不足所以权重低)
-        # 预留: 后续可加情绪因子×0.10
+        # ===== 综合 =====
+        # V4权重: 缠论×0.40 + 超跌×0.25 + ATR×0.10 + 资金×0.15 + 秋老虎+10
+        final_score = structure * 0.40 + oversold * 0.25 + volatility * 0.10 + mf_score * 0.15
+        
+        # 秋老虎: 已经从structure中移除，单独加10分
+        autumn_tiger = details.get('autumn_tiger', False)
+        if autumn_tiger:
+            final_score += 10
         
         final_score = max(0, min(100, round(final_score, 1)))
         
         details['structure_factor'] = structure
         details['oversold_factor'] = oversold
         details['volatility_factor'] = volatility
+        details['moneyflow_factor'] = mf_score
         
         return {'track': 'reversion', 'score': final_score, 'details': details}
         
@@ -398,22 +498,114 @@ def track_reversion(ts_code: str, ctx: MarketContext) -> Dict:
 
 
 # ============================================================
+# V4过滤层：量比/资金/大盘强度
+# ============================================================
+
+def _apply_filters(results: List[Dict], trade_date: str, hs300_trend: float) -> Dict[str, str]:
+    """
+    对批量评分结果应用买入过滤层
+    
+    过滤规则:
+    1. 爆量>2倍（拉高出货信号）→ 过滤
+    2. 大盘近5日跌>3% → 过滤（系统性风险）
+    3. 资金近5日净流出+爆量 → 过滤（主力出逃）
+    4. 缩量<0.5倍+资金流入 → 加分标记（地量见底）
+    
+    Returns:
+        {ts_code: reason} 被过滤的原因
+    """
+    filter_reasons = {}
+    
+    for r in results:
+        ts_code = r['ts_code']
+        reasons = []
+        
+        # 计算量比（当日vol/前20日均量）
+        vol_ratio = _calc_vol_ratio(ts_code, trade_date)
+        
+        # 规则1: 爆量>2倍 → 过滤
+        if vol_ratio > 2.0:
+            reasons.append(f'爆量{vol_ratio:.1f}倍>2')
+        
+        # 资金验证
+        _, mf_5d, lg_r = _calc_moneyflow_score(ts_code, trade_date)
+        
+        # 规则3: 爆量+资金流出
+        if vol_ratio > 2.0 and mf_5d < -50000:
+            reasons.append(f'爆量+资金流出{mf_5d/10000:.0f}万')
+        
+        # 规则4: 缩量<0.5倍+资金流入 → 加分（不过滤，只是标记）
+        if vol_ratio < 0.5 and mf_5d > 0:
+            r['_volume_bonus'] = True
+        
+        # 规则2: 大盘趋势判断（全局过滤）
+        if hs300_trend < -0.03:
+            r['_market_danger'] = True
+            reasons.append(f'大盘跌{hs300_trend*100:.1f}%>3%')
+        
+        # 记录过滤状态
+        if reasons:
+            r['_filtered'] = True
+            r['_filter_reasons'] = ';'.join(reasons)
+            filter_reasons[ts_code] = ';'.join(reasons)
+        else:
+            r['_filtered'] = False
+            r['_filter_reasons'] = ''
+    
+    return filter_reasons
+
+
+# ============================================================
 # 双轨评分主入口
 # ============================================================
+
+def _is_strong_stock(code, ctx):
+    """
+    判断个股是否为强势股（混沌期回退A轨用）
+    标准：前20日涨幅 > 15%
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT close FROM daily_kline_qfq
+            WHERE ts_code=%s AND trade_date <= %s
+            ORDER BY trade_date DESC LIMIT 20
+        """, (code, ctx.trade_date))
+        rows = [float(r['close']) for r in cur.fetchall()]
+        cur.close(); conn.close()
+        if len(rows) >= 20:
+            ret = (rows[0] - rows[-1]) / rows[-1]
+            return ret > 0.15
+        return False
+    except:
+        return False
+
 
 def score_stock(ts_code: str, ctx: MarketContext) -> Dict:
     """
     双轨评分入口
     根据市场上下文决定走哪条轨道
     
+    V12.2 (MAY, 2026-06-16):
+    混沌/秋/冬走B轨(均值回归)，但强势股(前20日涨幅>15%)回退到A轨(动量)
+    该逻辑在A/B回测中验证有效：回撤优化3.81%，交易+11笔
+    
     Returns:
         {'ts_code': ..., 'track': 'momentum'|'reversion', 
          'score': float, 'details': {...}}
     """
     if ctx.is_momentum_track():
+        # A轨季节：直接走动量
         result = track_momentum(ts_code, ctx)
     else:
-        result = track_reversion(ts_code, ctx)
+        # B轨季节（混沌/秋/冬）：强势股回退到A轨
+        if _is_strong_stock(ts_code, ctx):
+            result = track_momentum(ts_code, ctx)
+            result['track'] = 'momentum'
+            result['_bailout'] = True  # 标记为回退
+        else:
+            result = track_reversion(ts_code, ctx)
     
     result['ts_code'] = ts_code
     return result
@@ -619,6 +811,13 @@ def daily_pipeline(mode: str = 'watch_pool'):
     # 3. 批量评分
     results = batch_score(ts_codes, ctx)
     
+    # 3.5 过滤层（V4: 基于量比/资金/大盘的买入过滤）
+    hs300_trend = ctx.get_hs300_trend()
+    print(f"📊 大盘强度(沪深300近5日): {hs300_trend*100:+.2f}%")
+    filter_reasons = _apply_filters(results, ctx.trade_date, hs300_trend)
+    filtered_out = [r['ts_code'] for r in results if r.get('_filtered', False)]
+    print(f"🔒 过滤层: 排除{len(filtered_out)}只 | {len(results)-len(filtered_out)}只可通过")
+    
     # 4. 入库+打印top
     saved, skipped = 0, 0
     for i, r in enumerate(results):
@@ -703,16 +902,26 @@ def daily_pipeline(mode: str = 'watch_pool'):
                   autumn, tiger_conf,
                   ctx.raw.get('hengjiyuan_level', 'weak_heng')))
             saved += 1
-            if (i+1) % 50 == 0:
+            if (i+1) % 10 == 0:
+                conn.commit()
                 print(f"  💾 已入库 {i+1}/{tot}")
         except Exception as e:
             skipped += 1
             if skipped <= 3:
                 print(f"  ⚠️ 跳过 {r['ts_code']}: {e}")
     
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn.commit()  # final flush
+    except Exception as e:
+        print(f"  ⚠️ 最终提交失败(可能已分批提交完成): {e}")
+    try:
+        cur.close()
+    except Exception:
+        pass
+    try:
+        conn.close()
+    except Exception:
+        pass
     
     # 5. Top排序结果
     print(f"\n{'='*60}")
