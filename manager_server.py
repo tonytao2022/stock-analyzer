@@ -2566,10 +2566,13 @@ def strategy_config():
         return api_success([{
             'id': r['id'], 'name': r['name'], 'description': r['description'],
             'strategy_type': r['strategy_type'],
+            'season_type': r['season_type'],
             'params': {
                 'buy_min_score': r['buy_min_score'],
                 'p1_score': r['p1_score'], 'p2_score': r['p2_score'], 'p3_score': r['p3_score'],
                 'stop_loss_pct': float(r['stop_loss_pct']),
+                'trailing_stop_pct': float(r['trailing_stop_pct'] or 0),
+                'max_pos_pct': r['max_pos_pct'],
                 'max_hold_days': r['max_hold_days'], 'cool_days': r['cool_days'],
             }
         } for r in cfgs])
