@@ -888,6 +888,7 @@ def daily_pipeline(mode: str = 'watch_pool'):
                     track=VALUES(track), composite_score=VALUES(composite_score),
                     calibrated_score=VALUES(calibrated_score),
                     scoring_strategy=VALUES(scoring_strategy),
+                    direction=VALUES(direction),
                     operation_mode=VALUES(operation_mode),
                     buy_sell_point=VALUES(buy_sell_point),
                     reason_chain=VALUES(reason_chain),

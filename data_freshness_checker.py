@@ -140,7 +140,7 @@ def rebuild_snapshot():
     # fallback: 手动重建
     try:
         with db_cursor() as cur:
-            cur.execute("SELECT MAX(trade_date) as d FROM strategy_signal WHERE direction='dual_track_v1'")
+            cur.execute("SELECT MAX(trade_date) as d FROM strategy_signal")
             td = cur.fetchone()['d']
             if not td:
                 return False
@@ -162,7 +162,7 @@ def rebuild_snapshot():
                     ss.composite_score, ss.track,
                     (SELECT season FROM season_state WHERE index_code='MARKET' ORDER BY trade_date DESC LIMIT 1)
                 FROM strategy_signal ss
-                WHERE ss.direction='dual_track_v1' AND ss.trade_date=%s
+                WHERE ss.trade_date=%s
             """, (td,))
             cnt = cur.rowcount
             logger.info(f"  ✅ 快照手动重建: {cnt}条 ({td})")

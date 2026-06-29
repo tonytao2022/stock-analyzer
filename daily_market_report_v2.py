@@ -393,7 +393,7 @@ def generate_html(season, holdings, top_signals, watch_top, gainers, index_trend
     # 推荐买入 TOP（V2引擎 七因子评分）
     buy_rows = ""
     for i, sig in enumerate(top_signals, 1):
-        score = float(sig["composite_score"])
+        score = float(sig.get("composite_score", 0) or 0)
         bar_width = int(score)
         score_color = "#00c853" if score >= 85 else ("#ffc107" if score >= 72 else "#ff6b6b")
 
@@ -517,7 +517,7 @@ td {{ padding:6px 10px; border-bottom:1px solid #e5e7eb; }}
     </div>
 </div>
 <p style="margin-top:12px;font-size:14px;color:#333;"><strong>💡 策略建议：</strong>{position_advice}</p>
-<p style="font-size:12px;color:#888;">季节判定置信度：{confidence}% | 恒纪元评分：{hg_score} | V11参数：混沌期买入线75分</p>
+<p style="font-size:12px;color:#888;">季节判定置信度：{confidence}% | 恒纪元评分：{hg_score} | 当前参数：混沌期买入线75分</p>
 {chaos_info}
 </div>
 
@@ -565,7 +565,7 @@ td {{ padding:6px 10px; border-bottom:1px solid #e5e7eb; }}
 <!-- ====== 推荐买入 ====== -->
 <h2>🎯 今日推荐关注（V2七因子双轨评分 ≥72）</h2>
 <div class="card">
-<p style="font-size:12px;color:#888;margin-top:0;">基于 P6 双轨引擎 <strong>dual_track_v1</strong> · 七因子评分（缠论趋势30%+位置15%+结构10%+动量25%+大单净流入15%+融资融券10%+换手率过滤）| V11参数：当前{season_label}期买入线72分</p>
+<p style="font-size:12px;color:#888;margin-top:0;">基于 P6 双轨引擎 <strong>dual_track_v1</strong> · 七因子评分（缠论趋势30%+位置15%+结构10%+动量25%+大单净流入15%+融资融券10%+换手率过滤）| 当前{season_label}期买入线72分</p>
 <table>
 <tr><th>#</th><th>名称</th><th style="text-align:right">评分</th><th>评分条+因子</th><th>模式</th><th>季节</th><th>理由</th></tr>
 {buy_rows}
@@ -587,7 +587,7 @@ td {{ padding:6px 10px; border-bottom:1px solid #e5e7eb; }}
 </table>
 
 <!-- ====== 当前策略 ====== -->
-<h2>⚙️ V11四季参数矩阵</h2>
+<h2>⚙️ 四季参数矩阵</h2>
 <table>
 <tr><th>参数名</th><th>当前值</th><th>说明</th></tr>
 {cfg_rows}
@@ -638,7 +638,7 @@ def main():
     parser = argparse.ArgumentParser(description="每日市场总结报告 V2（基于stock_db_v2双轨引擎）")
     parser.add_argument("--send", action="store_true", help="发送到邮箱")
     parser.add_argument("--output", type=str, default=None, help="输出HTML到文件")
-    parser.add_argument("--min-score", type=float, default=72, help="最低推荐评分（V11参数默认72）")
+    parser.add_argument("--min-score", type=float, default=72, help="最低推荐评分（默认72）")
     parser.add_argument("--limit", type=int, default=10, help="推荐数量")
     args = parser.parse_args()
 
