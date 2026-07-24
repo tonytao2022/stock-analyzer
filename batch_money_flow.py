@@ -35,7 +35,7 @@ def main():
         SELECT DISTINCT ts_code FROM (
             SELECT ts_code FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'
             UNION
-            SELECT ts_code FROM watch_pool WHERE is_active=1 AND user_id='{get_user_id()}'
+            SELECT ts_code FROM watch_pool WHERE is_active=1 
         ) AS pool ORDER BY ts_code
     """)
     codes = [r['ts_code'] for r in cur.fetchall()]

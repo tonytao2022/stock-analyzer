@@ -12,7 +12,7 @@ P6 分季评分双轨引擎 v1.0
   ┃   缠论趋势分×0.7 + 动量因子×0.3
   ┃   P3信号基於轨道排序
   ┗━ 轨道B: 均值回归评分 (秋季/冬季/混沌*)
-       缠论结构×0.40 + 超跌深度×0.25 + ATR波动×0.10 + 资金因子×0.15 + 秋老虎+10分
+       缠论结构×0.40 + 超跌深度×0.25 + ATR波动×0.10 + 资金因子×0.15 + 秋老虎+15分
        P3信号基於轨道排序
 
   V4: 动量权重从70/30改为50/25/25(缠论/动量/资金), 回归加入资金因子
@@ -32,6 +32,18 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from season_engine import SeasonEngine
 from score_engine import score_chanlun_enhanced
+
+# buy_sell_confidence 买卖点置信度替换固定加减分 (v1, 2026-07-23 May)
+_BUY_SELL_CONFIDENCE = None
+def _get_bsc():
+    global _BUY_SELL_CONFIDENCE
+    if _BUY_SELL_CONFIDENCE is None:
+        try:
+            from buy_sell_confidence import BuySellConfidence
+            _BUY_SELL_CONFIDENCE = BuySellConfidence()
+        except Exception:
+            _BUY_SELL_CONFIDENCE = False
+    return _BUY_SELL_CONFIDENCE if _BUY_SELL_CONFIDENCE else None
 
 # ============================================================
 # 核心数据模型
@@ -66,13 +78,13 @@ class MarketContext:
         return 1.3 if self.is_momentum_track() else 1.0
 
     def get_hs300_trend(self) -> float:
-        """获取沪深300近5日涨幅，判断大盘强度"""
+        """获取沪深300近5日涨幅（从daily_kline读，qfq表数据不全）"""
         try:
             from db_config import get_connection
             conn = get_connection()
             cur = conn.cursor()
             cur.execute("""
-                SELECT close FROM daily_kline_qfq 
+                SELECT close FROM daily_kline 
                 WHERE ts_code='000300.SH' AND trade_date <= %s
                 ORDER BY trade_date DESC LIMIT 5
             """, (self.trade_date,))
@@ -90,15 +102,15 @@ class MarketContext:
 # ============================================================
 
 def _calc_vol_ratio(ts_code: str, trade_date: str) -> float:
-    """计算量比：当日vol / 前20日均vol"""
+    """计算量比：当日vol / 前20日均vol（从daily_kline读，qfq数据不全）"""
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
             SELECT k.vol / NULLIF(ma.avg_vol, 0) as vol_ratio
-            FROM daily_kline_qfq k
+            FROM daily_kline k
             JOIN (
-                SELECT AVG(vol) as avg_vol FROM daily_kline_qfq 
+                SELECT AVG(vol) as avg_vol FROM daily_kline 
                 WHERE ts_code=%s AND trade_date < %s AND trade_date >= DATE_SUB(%s, INTERVAL 20 DAY)
             ) ma ON 1=1
             WHERE k.ts_code=%s AND k.trade_date=%s
@@ -113,71 +125,228 @@ def _calc_vol_ratio(ts_code: str, trade_date: str) -> float:
 
 
 def _calc_moneyflow_score(ts_code: str, trade_date: str) -> tuple:
-    """计算资金因子
-    查询 moneyflow 表（真实资金流向数据）
+    """
+    资金因子 v2.0 — 精细化重写
+
+    优化点:
+    1. 特大单净额独立评分（原仅用大单+特大单合计）
+    2. 用net_mf_amount/流通市值标准化消除大小盘偏差
+    3. 特大单/大单比值作为方向强度因子
+
     Returns:
-        (moneyflow_score, net_mf_amount, lg_ratio, vol_ratio)
+        (moneyflow_score, net_mf_amount, smart_ratio)
     """
     try:
-        import pymysql
         conn = get_connection()
-        cur = conn.cursor(pymysql.cursors.DictCursor)
-        # 近5日累计净流入 + 大单/特大单方向判断
+        cur = conn.cursor()
+
+        # 1. 近5日累计净流入
         cur.execute("""
             SELECT
-                COALESCE(SUM(net_mf_amount), 0) as mf_5d,
-                COALESCE(SUM(buy_lg_amount - sell_lg_amount), 0) as lg_net_5d,
-                COALESCE(SUM(buy_elg_amount - sell_elg_amount), 0) as elg_net_5d
-            FROM moneyflow
-            WHERE ts_code=%s AND trade_date <= %s AND trade_date >= DATE_SUB(%s, INTERVAL 5 DAY)
+                COALESCE(SUM(m.net_mf_amount), 0) as mf_5d,
+                COALESCE(SUM(m.buy_lg_amount - m.sell_lg_amount), 0) as lg_net_5d,
+                COALESCE(SUM(m.buy_elg_amount - m.sell_elg_amount), 0) as elg_net_5d,
+                COALESCE(SUM(m.buy_lg_amount + m.buy_elg_amount), 0) as buy_smart,
+                COALESCE(SUM(m.sell_lg_amount + m.sell_elg_amount), 0) as sell_smart
+            FROM moneyflow m
+            WHERE m.ts_code=%s AND m.trade_date <= %s
+              AND m.trade_date >= DATE_SUB(%s, INTERVAL 5 DAY)
         """, (ts_code, trade_date, trade_date))
         row = cur.fetchone()
+
+        if not row or row['mf_5d'] is None:
+            cur.close(); conn.close()
+            return 50, 0, 0
+
+        mf_5d = float(row['mf_5d'])
+        lg_net = float(row['lg_net_5d'] or 0)
+        elg_net = float(row['elg_net_5d'] or 0)
+        buy_smart = float(row['buy_smart'] or 0)
+        sell_smart = float(row['sell_smart'] or 0)
+
+        # 2. 双分母标准化：净流入 / min(流通市值×1%, 日均成交额(估算)×2)
+        cur.execute("""
+            SELECT
+                AVG(d.circ_mv) as avg_circ_mv,
+                AVG(d.circ_mv * COALESCE(d.turnover_rate, 0.01)) as avg_est_amount
+            FROM daily_basic d
+            WHERE d.ts_code=%s AND d.trade_date <= %s
+              AND d.trade_date >= DATE_SUB(%s, INTERVAL 5 DAY)
+        """, (ts_code, trade_date, trade_date))
+        mv_row = cur.fetchone()
+        avg_circ_mv = float(mv_row['avg_circ_mv'] or 0) if mv_row else 0
+        avg_est_amount = float(mv_row['avg_est_amount'] or 0) if mv_row else 0
+
         cur.close(); conn.close()
 
-        if row and row['mf_5d'] is not None:
-            mf_5d = float(row['mf_5d'])
-            lg_net = float(row['lg_net_5d'] or 0)
-            elg_net = float(row['elg_net_5d'] or 0)
+        # MAY建议：双分母 - 取市值1%和日均成交额2倍的较小值作为基准
+        # 当circ_mv不可用(历史数据)时, fallback到原始净流入额评分(v1)
+        if avg_circ_mv > 0 and avg_est_amount > 0:
+            denom = min(avg_circ_mv * 0.01, avg_est_amount * 2.0)
+            denom = max(denom, 10000)
+            mf_ratio = mf_5d / denom if denom > 0 else 0
+            use_double_denom = True
+        else:
+            # fallback: 直接按净流入绝对值评分
+            mf_ratio = 0
+            use_double_denom = False
+        
+        if use_double_denom:
+            # 双分母标准化评分
+            if mf_ratio > 0.03:     mf_score = 90
+            elif mf_ratio > 0.015:  mf_score = 80
+            elif mf_ratio > 0.005:  mf_score = 70
+            elif mf_ratio > 0:      mf_score = 58
+            elif mf_ratio > -0.005: mf_score = 42
+            elif mf_ratio > -0.015: mf_score = 28
+            elif mf_ratio > -0.03:  mf_score = 18
+            else:                   mf_score = 10
+        else:
+            # fallback: 原始净流入额评分 (兼容历史数据)
+            if mf_5d > 10000:       mf_score = 85
+            elif mf_5d > 5000:      mf_score = 75
+            elif mf_5d > 0:         mf_score = 60
+            elif mf_5d > -5000:     mf_score = 40
+            elif mf_5d > -10000:    mf_score = 25
+            else:                   mf_score = 15
 
-            # 净流入额评分 (万元)
-            if mf_5d > 10000:      # +1亿以上
-                mf_score = 85
-            elif mf_5d > 5000:     # +5000万~1亿
-                mf_score = 75
-            elif mf_5d > 0:        # 净流入但小于5000万
-                mf_score = 60
-            elif mf_5d > -5000:    # 净流出小于5000万
-                mf_score = 40
-            elif mf_5d > -10000:   # 净流出5000万~1亿
-                mf_score = 25
-            else:                   # 净流出1亿以上
-                mf_score = 15
+        # 基础评分（基于流通市值标准化比例）
+        if mf_ratio > 0.03:
+            mf_score = 90
+        elif mf_ratio > 0.015:
+            mf_score = 80
+        elif mf_ratio > 0.005:
+            mf_score = 70
+        elif mf_ratio > 0:
+            mf_score = 58
+        elif mf_ratio > -0.005:
+            mf_score = 42
+        elif mf_ratio > -0.015:
+            mf_score = 28
+        elif mf_ratio > -0.03:
+            mf_score = 18
+        else:
+            mf_score = 10
 
-            # 大单/特大单方向修正
-            total_smart = lg_net + elg_net
-            if total_smart > 5000:       # 聪明钱大举流入
-                mf_score = min(100, mf_score + 15)
-            elif total_smart > 0:        # 聪明钱小幅流入
+        # 特大单/大单比值（方向强度）
+        total_smart = buy_smart + sell_smart + 1
+        if total_smart > 1:
+            elg_ratio = (abs(elg_net) + 1) / (abs(lg_net) + abs(elg_net) + 1)
+            if elg_net > 0 and elg_ratio > 0.4:
+                mf_score = min(100, mf_score + 12)
+            elif elg_net > 0:
+                mf_score = min(100, mf_score + 6)
+
+            smart_ratio = (buy_smart - sell_smart) / total_smart
+            if smart_ratio > 0.15:
+                mf_score = min(100, mf_score + 8)
+            elif smart_ratio < -0.15:
+                mf_score = max(0, mf_score - 8)
+        else:
+            smart_ratio = 0
+
+        # 近3日趋势一致性
+        cur2 = get_connection()
+        cur2c = cur2.cursor()
+        cur2c.execute("""
+            SELECT net_mf_amount FROM moneyflow
+            WHERE ts_code=%s AND trade_date <= %s
+            ORDER BY trade_date DESC LIMIT 3
+        """, (ts_code, trade_date))
+        recent = cur2c.fetchall()
+        cur2c.close(); cur2.close()
+
+        if len(recent) >= 3:
+            pos_days = sum(1 for r in recent if float(r['net_mf_amount'] or 0) > 0)
+            if pos_days >= 2:
                 mf_score = min(100, mf_score + 5)
-            elif total_smart < -5000:    # 聪明钱大举出逃
-                mf_score = max(0, mf_score - 15)
-            elif total_smart < 0:        # 聪明钱小幅流出
+            elif pos_days <= 1 and mf_5d < 0:
                 mf_score = max(0, mf_score - 5)
 
-            # 大单/特大单比例（判断主力方向强度）
-            total_vol = abs(lg_net) + abs(elg_net) + 1  # 防0
-            smart_ratio = (lg_net + elg_net) / total_vol if total_vol > 0 else 0
-            return mf_score, mf_5d, smart_ratio
+        return round(mf_score, 1), round(mf_5d, 0), round(smart_ratio, 4)
     except Exception as e:
         import traceback; traceback.print_exc()
-        pass
-    return 50, 0, 0
+        return 50, 0, 0
+
+
+def _calc_position_score(ts_code: str, trade_date_str: str) -> tuple:
+    """
+    计算位置因子：基于250日均线偏离度
+    返回: (pos_score, pos_dev) 各0~100/浮点数
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT close, ma_250 FROM daily_kline d
+            LEFT JOIN technical_indicator t ON d.ts_code=t.ts_code AND d.trade_date=t.trade_date
+            WHERE d.ts_code=%s AND d.trade_date <= %s
+            ORDER BY d.trade_date DESC LIMIT 250
+        """, (ts_code, trade_date_str))
+        rows = cur.fetchall()
+        if not rows or len(rows) < 250:
+            return 50, 0.0
+        
+        last_close = float(rows[0]['close'])
+        
+        # 优先使用表里的ma250
+        ma250 = float(rows[0].get('ma_250', 0) or 0)
+        if ma250 <= 0:
+            # 自己算
+            ma250 = sum(float(r['close']) for r in rows[:250]) / 250
+        
+        dev = (last_close - ma250) / ma250 if ma250 > 0 else 0.0
+        
+        # 价格在均线附近60%仓位 -> 50分基准
+        # 低于MA250超跌加分，高于MA250过热减分
+        pos_score = (dev + 0.30) / 0.60 * 100
+        pos_score = max(0, min(100, pos_score))
+        return pos_score, round(dev, 4)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return 50, 0.0
+    finally:
+        cur.close(); conn.close()
+
+
+def _calc_margin_score(ts_code: str, trade_date_str: str) -> float:
+    """
+    计算融资因子：基于近5日融资买入均值
+    返回: 融资评分0~100
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT rzmre FROM margin_detail
+            WHERE ts_code=%s AND trade_date <= %s
+            ORDER BY trade_date DESC LIMIT 5
+        """, (ts_code, trade_date_str))
+        rows = cur.fetchall()
+        if not rows or len(rows) < 5:
+            return 50
+        rz_values = [float(r['rzmre'] or 0) for r in rows if r.get('rzmre') is not None]
+        if not rz_values:
+            return 50
+        avg_rz = sum(rz_values) / len(rz_values)
+        # log10(avg_rz万) -> 0~100 映射
+        margin_score = math.log10(max(1, avg_rz / 10000)) / 5.0 * 100
+        margin_score = max(0, min(100, margin_score))
+        return margin_score
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return 50
+    finally:
+        cur.close(); conn.close()
 
 
 def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
     """
     动量轨道评分
-    V4权重: 缠论趋势分×0.50 + 动量因子×0.25 + 资金因子×0.25
+    V13.3e (2026-07-20 MAY+Main联合调优) 权重:
+    趋势×0.30 + 位置×0.08 + 结构×0.12 + 动量×0.30 + 资金×0.20 = 100%
+    移除融资因子(僵尸因子,大部分票无数据退化为50分常量)
+    结构分从5%提至12%, 动量从25%提至30%, 资金从15%提至20%
     
     Returns:
         {'track': 'momentum', 'score': float, 'details': {...}}
@@ -218,9 +387,9 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
         cl_row = cur.fetchone()
         cur.close(); conn.close()
         
-        # ──────── 计算三个因子 ────────
+        # ──────── 计算六个因子 ────────
         
-        # 1. 缠论趋势分 (50%)
+        # 1. 缠论趋势分 (30%)
         trend_score = 50
         if cl_row and cl_row.get('structure_score') is not None:
             ss = float(cl_row['structure_score'])
@@ -230,14 +399,31 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
             else: trend_score = 35
             
             bs = cl_row.get('buy_sell_point', 'none')
-            bs_boost = {'buy3': 15, 'buy2': 8, 'buy1': 3, 'sell3': -15, 'sell2': -8, 'sell1': -3}.get(bs, 0)
-            trend_score = max(0, min(100, trend_score + bs_boost))
-            
+            bsc = _get_bsc()
             bt = cl_row.get('beichi_type', 'none')
-            if bt == 'bottom' and float(cl_row.get('beichi_strength', 0) or 0) > 40:
-                trend_score = min(100, trend_score + 10)
-            elif bt == 'top' and float(cl_row.get('beichi_strength', 0) or 0) > 40:
-                trend_score = max(0, trend_score - 10)
+            bstr = float(cl_row.get('beichi_strength', 0) or 0)
+
+            if bsc:
+                # V13.3f: 置信度模型替换固定加减分
+                mf_s = _calc_moneyflow_score(ts_code, ctx.trade_date)[0]
+                c_struct = bsc.calc_struct_confidence(ss, bs, bt, bstr, bool(cl_row.get('autumn_tiger', 0)))
+                c_consensus = bsc.calc_consensus_confidence(None, ss, mf_s, None)
+                c_history = bsc.calc_history_confidence(ts_code, ctx.trade_date)
+                
+                bs_adj = bsc.get_bs_adjustment(bs, c_struct, c_history, c_consensus)
+                trend_score = max(0, min(100, trend_score + bs_adj['boost']))
+                
+                bc_adj = bsc.get_beichi_adjustment(bt, bstr, 0, c_consensus)
+                if bc_adj['boost'] != 0:
+                    trend_score = max(0, min(100, trend_score + bc_adj['boost']))
+            else:
+                # fallback: 原固定方案
+                bs_boost = {'buy3': 15, 'buy2': 8, 'buy1': 3, 'sell3': -15, 'sell2': -8, 'sell1': -3}.get(bs, 0)
+                trend_score = max(0, min(100, trend_score + bs_boost))
+                if bt == 'bottom' and bstr > 40:
+                    trend_score = min(100, trend_score + 10)
+                elif bt == 'top' and bstr > 40:
+                    trend_score = max(0, trend_score - 10)
         else:
             close = float(latest['close'])
             ma20 = float(latest.get('ma20', 0) or 0)
@@ -248,7 +434,14 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
                 elif close > ma60: trend_score = 45
                 else: trend_score = 35
         
-        # 2. 动量因子 (25%)
+        # 2. 缠论结构分 (5%) — 从chanlun_structure直接取
+        structure_score = float(cl_row['structure_score']) if cl_row and cl_row.get('structure_score') is not None else 50
+        structure_score = max(0, min(100, structure_score))
+        
+        # 3. 位置因子 (15%) — 基于250日均线偏离
+        pos_score, pos_dev = _calc_position_score(ts_code, ctx.trade_date)
+        
+        # 4. 动量因子 (25%)
         closes = [float(r['close']) for r in reversed(rows)]
         n = len(closes)
         momentum = 50
@@ -263,29 +456,114 @@ def track_momentum(ts_code: str, ctx: MarketContext) -> Dict:
             rsi_val = float(latest.get('rsi_14', 50) or 50)
             
             score = 50
-            score += max(-15, min(15, r5 * 150))
-            score += max(-10, min(10, r10 * 80))
+            if bsc:
+                # V13.3f: 置信度修正动量调整
+                mom_adj = bsc.get_momentum_adjustment(r5, r10, c_struct, c_history)
+                score += mom_adj['boost_5d']
+                score += mom_adj['boost_10d']
+            else:
+                # fallback: 旧固定方案
+                score += max(-15, min(15, r5 * 150))
+                score += max(-10, min(10, r10 * 80))
             score += max(-8, min(8, r20 * 50))
             score += min(8, cons_up * 2)
             score += (rsi_val - 50) * 0.5
             momentum = max(0, min(100, score))
         
-        # 3. 资金因子 (25%)
+        # 5. 资金因子 (15%)
         mf_score, mf_5d, lg_r = _calc_moneyflow_score(ts_code, ctx.trade_date)
         
+        # 6. 融资因子 (10%)
+        margin_score = _calc_margin_score(ts_code, ctx.trade_date)
+        
         details['chanlun_trend'] = trend_score
+        details['structure_score'] = structure_score
+        details['pos_score'] = pos_score
+        details['pos_dev'] = pos_dev
         details['momentum_raw'] = momentum
         details['mf_score'] = mf_score
+        details['margin_score'] = margin_score
         details['mf_5d'] = round(mf_5d, 0)
         details['lg_ratio'] = round(lg_r, 4)
         details['chanlun_row'] = bool(cl_row)
-        
-        # 4. 综合：缠论×0.50 + 动量×0.25 + 资金×0.25
-        final_score = trend_score * 0.50 + momentum * 0.25 + mf_score * 0.25
-        final_score = max(0, min(100, round(final_score, 1)))
-        
+        details['vol_ratio'] = _calc_vol_ratio(ts_code, ctx.trade_date)
+
+        # ─── 价格下跌惩罚 V13.3b (2026-07-18, 回测最优版) ───
+        # 对齐backtest_v133_fast.py的V13.3b规则：回测验证总收益+33.36%/卡玛3.20x
+        penalty_score = 0.0
+        penalty_reason = []
+
+        if n >= 20:
+            r5 = (closes[-1] - closes[-6]) / closes[-6] if len(closes) >= 6 else 0
+            r10 = (closes[-1] - closes[-11]) / closes[-11] if len(closes) >= 11 else 0
+            r20_ret = (closes[-1] - closes[-21]) / closes[-21] if len(closes) >= 21 else 0
+
+            close_price = float(latest['close'])
+            ma5 = float(latest.get('ma_5', 0) or 0)
+            ma20 = float(latest.get('ma_20', 0) or 0)
+
+            # 如果technical_indicator没有MA数据，从closes自己算
+            if ma20 <= 0 and len(closes) >= 20:
+                ma20 = sum(closes[-20:]) / 20
+            if ma5 <= 0 and len(closes) >= 5:
+                ma5 = sum(closes[-5:]) / 5
+
+            # ─── 破MA20 → 趋势分打折 ───
+            if ma20 > 0 and close_price < ma20:
+                below_ma20 = (ma20 - close_price) / ma20
+                original_trend = trend_score
+                discount = max(0.6, 1.0 - below_ma20 * 0.5)  # V13.3b: 打折更狠
+                trend_score = int(original_trend * discount)
+                if trend_score != original_trend:
+                    tloss = (original_trend - trend_score) * 0.30
+                    penalty_score += round(tloss, 1)
+                    penalty_reason.append(f'破MA20(t{original_trend}→{trend_score})')
+                    details['trend_orig'] = original_trend
+
+            # ─── 空头排列检查（V13.3b: +8分）───
+            if ma5 > 0 and ma20 > 0 and close_price < ma5 and ma5 < ma20:
+                penalty_score += 5
+                penalty_reason.append('空头排列+5')
+
+            # ─── 跌幅惩罚（V13.3b: 阈值更宽, 上限更高）───
+            if r5 < -0.05:  # 5日跌超5%
+                p = min(15, int(abs(r5) * 180))
+                penalty_score += p
+                penalty_reason.append(f'5日跌{r5*100:.0f}%-{p}')
+            if r10 < -0.08:  # 10日跌超8%
+                p = min(15, int(abs(r10) * 120))
+                penalty_score += p
+                penalty_reason.append(f'10日跌{r10*100:.0f}%-{p}')
+            if r20_ret < -0.10:  # 20日跌超10%
+                p = min(15, int(abs(r20_ret) * 100))
+                penalty_score += p
+                penalty_reason.append(f'20日跌{r20_ret*100:.0f}%-{p}')
+
+        # ═══ V13.3f: 惩罚分置信度季节修正 (2026-07-23 May) ═══
+        if bsc and penalty_score > 0:
+            pa = bsc.get_penalty_confidence(penalty_score, c_consensus, ctx.season)
+            orig_p = penalty_score
+            penalty_score = pa['adjusted_penalty']
+            if abs(penalty_score - orig_p) > 0.5:
+                penalty_reason.append(f'置信修正{pa["multiplier"]}x({orig_p}→{penalty_score})')
+
+        # ═══ V13.3e-fix: 惩罚分全局上限30 ═══
+        if penalty_score > 30:
+            penalty_reason.append(f'全局上限30(原{round(penalty_score,1)})')
+            penalty_score = 30
+        details['penalty_score'] = round(penalty_score, 1)
+        details['penalty_reason'] = ';'.join(penalty_reason) if penalty_reason else '无'
+
+        # 7. 综合（扣除惩罚分）
+        # V13.3e权重: 趋势30% + 位置8% + 结构12% + 动量30% + 资金20%
+        final_score = (trend_score * 0.30 + pos_score * 0.08 + structure_score * 0.12 +
+                       momentum * 0.30 + mf_score * 0.20)
+        final_score = max(0, min(100, round(final_score - penalty_score, 1)))
+
+        details['final_raw'] = round(final_score + penalty_score, 1)
+
         return {'track': 'momentum', 'score': final_score, 'details': details}
-        
+
     except Exception as e:
         return {'track': 'momentum', 'score': 50, 'reason': str(e)}
 
@@ -363,19 +641,42 @@ def track_reversion(ts_code: str, ctx: MarketContext) -> Dict:
             elif ss >= 60: structure = 65
             elif ss >= 40: structure = 50
             else: structure = 35
-            
-            # 底背离=均值回归买点
-            if bt == 'bottom' and bstr > 40:
-                structure = min(100, structure + 15)
-            elif bs in ('buy2', 'buy3'):
-                structure = min(100, structure + 10)
+
+            bsc = _get_bsc()
+            if bsc:
+                # V13.3f: 置信度模型替换固定加减分 (May 2026-07-23)
+                # B轨只需要 c_struct (有缠论数据) + c_consensus (因子一致)
+                mf_b_sc, _, _ = _calc_moneyflow_score(ts_code, ctx.trade_date)
+                c_struct_b = bsc.calc_struct_confidence(ss, bs, bt, bstr, at)
+                c_consensus_b = bsc.calc_consensus_confidence(None, ss, mf_b_sc, None)
+                
+                # 底背驰调整
+                bc_adj = bsc.get_beichi_adjustment(bt, bstr, 0, c_consensus_b)
+                if bc_adj['boost'] != 0:
+                    structure = max(0, min(100, structure + bc_adj['boost']))
+                
+                # 买卖点调整
+                if bs in ('buy2', 'buy3'):
+                    bs_adj = bsc.get_bs_adjustment(bs, c_struct_b, 45, c_consensus_b)
+                    structure = max(0, min(100, structure + bs_adj['boost']))
+                
+                # 秋老虎调整 (由C_struct中的tiger_penalty处理)
+                if at:
+                    # C_struct已经包含秋老虎-20惩罚，这里不加分
+                    pass
+            else:
+                # fallback: 原固定方案
+                # 底背离=均值回归买点
+                if bt == 'bottom' and bstr > 40:
+                    structure = min(100, structure + 15)
+                elif bs in ('buy2', 'buy3'):
+                    structure = min(100, structure + 10)
+                # 秋老虎加分
+                if at:
+                    structure = min(100, structure + 15)
             
             details['chanlun_structure'] = structure
             details['autumn_tiger'] = at
-            
-            # 秋老虎加分
-            if at:
-                structure = min(100, structure + 15)
         
         # ===== 因子2: 超跌深度 (30%) =====
         oversold = 50
@@ -474,9 +775,10 @@ def track_reversion(ts_code: str, ctx: MarketContext) -> Dict:
         details['mf_score'] = mf_score
         details['mf_5d'] = round(mf_5d, 0)
         details['lg_ratio'] = round(lg_r, 4)
+        details['vol_ratio'] = _calc_vol_ratio(ts_code, ctx.trade_date)
         
         # ===== 综合 =====
-        # V4权重: 缠论×0.40 + 超跌×0.25 + ATR×0.10 + 资金×0.15 + 秋老虎+10
+        # V4权重: 缠论×0.40 + 超跌×0.25 + ATR×0.10 + 资金×0.15 + 秋老虎+15
         final_score = structure * 0.40 + oversold * 0.25 + volatility * 0.10 + mf_score * 0.15
         
         # 秋老虎: 已经从structure中移除，单独加10分
@@ -489,8 +791,63 @@ def track_reversion(ts_code: str, ctx: MarketContext) -> Dict:
         details['structure_factor'] = structure
         details['oversold_factor'] = oversold
         details['volatility_factor'] = volatility
-        details['moneyflow_factor'] = mf_score
-        
+        details['mf_score'] = mf_score
+        details['pos_score'] = oversold  # B轨超跌分当作位置因子复用
+        details['structure_score'] = structure  # B轨结构分直接从缠论获取
+        details['margin_score'] = 50     # B轨暂不计算融资因子，默认中性
+
+        # ─── 价格下跌惩罚（同动量轨 V13.3b，回测最优版） ───
+        penalty_score = 0.0
+        penalty_reason = []
+        if n >= 20:
+            close_price = close
+            # 使用已有的closes数组计算ma5、ma20和涨跌幅
+            ma5_c = sum(closes[-5:]) / 5 if len(closes) >= 5 else 0
+            ma20_c = sum(closes[-20:]) / 20
+            r5 = (closes[-1] - closes[-6]) / closes[-6] if len(closes) >= 6 else 0
+            r10 = (closes[-1] - closes[-11]) / closes[-11] if len(closes) >= 11 else 0
+            r20 = (closes[-1] - closes[-21]) / closes[-21] if len(closes) >= 21 else 0
+            # 破MA20
+            if ma20_c > 0 and close_price < ma20_c:
+                below_ma20 = (ma20_c - close_price) / ma20_c
+                discount = max(0.6, 1.0 - below_ma20 * 0.5)
+                if discount < 1.0:
+                    tloss = 55 * (1 - discount) * 0.40
+                    if tloss > 2:
+                        penalty_score += round(tloss, 1)
+                        penalty_reason.append(f'破MA20-{round(tloss,1)}')
+            # 空头排列
+            if ma5_c > 0 and ma20_c > 0 and close_price < ma5_c and ma5_c < ma20_c:
+                penalty_score += 5
+                penalty_reason.append('空头排列+5')
+            # 跌幅惩罚
+            if r5 < -0.05:
+                p = min(15, int(abs(r5) * 180))
+                penalty_score += p
+                penalty_reason.append(f'5日跌{r5*100:.0f}%-{p}')
+            if r10 < -0.08:
+                p = min(15, int(abs(r10) * 120))
+                penalty_score += p
+                penalty_reason.append(f'10日跌{r10*100:.0f}%-{p}')
+            if r20 < -0.10:
+                p = min(15, int(abs(r20) * 100))
+                penalty_score += p
+                penalty_reason.append(f'20日跌{r20*100:.0f}%-{p}')
+
+        # ═══ V13.3f: B轨惩罚分置信度修正 (May 2026-07-23) ═══
+        if bsc and penalty_score > 0:
+            c_consensus_b = bsc.calc_consensus_confidence(None, ss, mf_score, None)
+            pa = bsc.get_penalty_confidence(penalty_score, c_consensus_b, ctx.season)
+            orig_p = penalty_score
+            penalty_score = pa['adjusted_penalty']
+            if abs(penalty_score - orig_p) > 0.5:
+                penalty_reason.append(f'置信修正{pa["multiplier"]}x({orig_p}→{penalty_score})')
+
+        details['penalty_score'] = round(penalty_score, 1)
+        details['penalty_reason'] = ';'.join(penalty_reason) if penalty_reason else '无'
+        final_score = max(0, min(100, round(final_score - penalty_score, 1)))
+        details['final_raw'] = round(final_score + penalty_score, 1)
+
         return {'track': 'reversion', 'score': final_score, 'details': details}
         
     except Exception as e:
@@ -568,7 +925,7 @@ def _is_strong_stock(code, ctx):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT close FROM daily_kline_qfq
+            SELECT close FROM daily_kline
             WHERE ts_code=%s AND trade_date <= %s
             ORDER BY trade_date DESC LIMIT 20
         """, (code, ctx.trade_date))
@@ -584,30 +941,62 @@ def _is_strong_stock(code, ctx):
 
 def score_stock(ts_code: str, ctx: MarketContext) -> Dict:
     """
-    双轨评分入口
-    根据市场上下文决定走哪条轨道
+    双轨评分入口 + 独立短期过滤层
     
     V12.2 (MAY, 2026-06-16):
     混沌/秋/冬走B轨(均值回归)，但强势股(前20日涨幅>15%)回退到A轨(动量)
-    该逻辑在A/B回测中验证有效：回撤优化3.81%，交易+11笔
+
+    V12.5 (2026-06-22) MAY建议：
+    短期信号重构为独立过滤层 A/B档：
+    - A档：短期分>=60 → 正常通过
+    - B档：短期分<60 → 候选模式（评分不变，但前端标记为"候选"）
+    不在engine内部改分，交给前端/策略层决策
     
     Returns:
         {'ts_code': ..., 'track': 'momentum'|'reversion', 
-         'score': float, 'details': {...}}
+         'score': float, 'details': {...},
+         'stf': {...}, 'stf_tier': 'A'|'B'}
     """
     if ctx.is_momentum_track():
-        # A轨季节：直接走动量
         result = track_momentum(ts_code, ctx)
     else:
-        # B轨季节（混沌/秋/冬）：强势股回退到A轨
         if _is_strong_stock(ts_code, ctx):
             result = track_momentum(ts_code, ctx)
             result['track'] = 'momentum'
-            result['_bailout'] = True  # 标记为回退
+            result['_bailout'] = True
         else:
             result = track_reversion(ts_code, ctx)
     
     result['ts_code'] = ts_code
+    
+    # V12.5: 独立短期过滤层（MAY建议A/B档）
+    try:
+        from short_term_filter import calc_short_term_score
+        stf = calc_short_term_score(ts_code, ctx.trade_date)
+        result['stf'] = stf
+        stfs = stf.get('short_term_score', 50)
+        # MAY: 资金惯性权重应最大，这维单独检查
+        cap_inertia = stf.get('capital_inertia', 50)
+        
+        # A/B档判定：短期分>=60为A档，<60为B档
+        if stfs >= 60 and cap_inertia >= 50:
+            result['stf_tier'] = 'A'
+            result['_stf_tier_label'] = '😊 A档-优先'
+        elif stfs >= 50:
+            result['stf_tier'] = 'B'
+            result['_stf_tier_label'] = '👀 B档-候选'
+        else:
+            result['stf_tier'] = 'B'
+            result['_stf_tier_label'] = '👀 B档-候选'
+            # 资金惯性太低(<35)的B档标为高风险
+            if cap_inertia < 35:
+                result['stf_tier'] = 'B_highrisk'
+                result['_stf_tier_label'] = '⚠️ B档-高风险'
+    except Exception as e:
+        result['stf'] = {'short_term_score': 50, 'capital_inertia': 50}
+        result['stf_tier'] = 'A'
+        result['_stf_tier_label'] = '😊 默认'
+    
     return result
 
 
@@ -818,7 +1207,16 @@ def daily_pipeline(mode: str = 'watch_pool'):
     filtered_out = [r['ts_code'] for r in results if r.get('_filtered', False)]
     print(f"🔒 过滤层: 排除{len(filtered_out)}只 | {len(results)-len(filtered_out)}只可通过")
     
-    # 4. 入库+打印top
+    # 4. 初始化置信度引擎（用于计算signal_confidence + safety_gate）
+    try:
+        from confidence_engine import ConfidenceEngine
+        _ce = ConfidenceEngine()
+        _ce_ok = True
+    except Exception:
+        _ce_ok = False
+        print("  ⚠️ 置信度引擎未加载，使用简单映射")
+    
+    # 4b. 入库+打印top
     saved, skipped = 0, 0
     for i, r in enumerate(results):
         try:
@@ -851,13 +1249,58 @@ def daily_pipeline(mode: str = 'watch_pool'):
             else:
                 op_mode = 'dormant'
             
-            # 计算 signal_confidence
-            if calib >= 80:
-                sig_conf = 'high'
-            elif calib >= 60:
-                sig_conf = 'medium'
+            # 计算 signal_confidence — 使用置信度引擎
+            if _ce_ok:
+                # 从strategy_signal表获取最新历史评分（检查是否持仓）
+                try:
+                    is_holding = False
+                    cur.execute("SELECT 1 FROM portfolio_holdings WHERE ts_code=%s AND status='HOLDING'", (code,))
+                    if cur.fetchone():
+                        is_holding = True
+                except Exception:
+                    is_holding = False
+                
+            sig_conf = 'low'  # 默认
+            _dir = 'dormant'
+            _sig_label = None
+            _gate = None
+            _gated = False
+            
+            if _ce_ok:
+                try:
+                    _row = {
+                        'calibrated_score': calib,
+                        'trend_score': t_score,
+                        'structure_score': s_score,
+                        'mf_score': mf,
+                        'momentum_score': m_score,
+                        'buy_sell_point': bs,
+                        'direction': op_mode,
+                        'season': ctx.season,
+                        'autumn_tiger': bool(autumn),
+                    }
+                    _cr = _ce.run_confidence(code, ctx.trade_date, _row, is_holding=is_holding)
+                    sig_conf = _cr['confidence_level']  # A/B/C/D/E
+                    _dir = _cr['direction']
+                    _sig_label = _cr['signal_label']
+                    _gate = _cr['safety_gate']
+                    _gated = _cr['gate_triggered']
+                except Exception:
+                    # fallback to simple mapping
+                    if calib >= 80:
+                        sig_conf = 'A'
+                    elif calib >= 60:
+                        sig_conf = 'B'
+                    else:
+                        sig_conf = 'C'
             else:
-                sig_conf = 'low'
+                # 简单映射（无置信度引擎时）
+                if calib >= 80:
+                    sig_conf = 'A'
+                elif calib >= 60:
+                    sig_conf = 'B'
+                else:
+                    sig_conf = 'C'
             
             # 构建 reason_chain
             track_label = '动量' if r['track'] == 'momentum' else '回归'
@@ -877,13 +1320,38 @@ def daily_pipeline(mode: str = 'watch_pool'):
                 reason_parts.append('秋老虎')
             reason = '+'.join(reason_parts)
             
+            # V12.5: 短期信号分
+            stf = r.get('stf', {}) or {}
+            stf_score = float(stf.get('short_term_score', 50) or 50)
+            stf_capital = float(stf.get('capital_inertia', 50) or 50)
+            stf_volume = float(stf.get('volume_health', 50) or 50)
+            stf_overbought = float(stf.get('overbought_safety', 50) or 50)
+            stf_momentum = float(stf.get('short_momentum', 50) or 50)
+
+            det = r.get('details', {}) or {}
+            p_score = float(det.get('penalty_score', 0) or 0)
+            p_reason = det.get('penalty_reason', '')
+            # 子因子分：A轨用chanlun_trend, B轨复用structure_factor不影响
+            t_score = float(det.get('chanlun_trend', 0) or 0)
+            s_score = float(det.get('structure_score', 0) or 0)
+            m_score = float(det.get('momentum_raw', 0) or 0)
+            mf = float(det.get('mf_score', 0) or 0)
+            ps = float(det.get('pos_score', 0) or 0)
+
             cur.execute("""
                 INSERT INTO strategy_signal 
                     (ts_code, trade_date, track, composite_score, calibrated_score,
                      scoring_strategy, direction, operation_mode, buy_sell_point,
                      reason_chain, signal_confidence, autumn_tiger, tiger_confidence,
-                     hengjiyuan_level)
-                VALUES (%s, %s, %s, %s, %s, %s, 'dual_track_v1', %s, %s, %s, %s, %s, %s, %s)
+                     hengjiyuan_level, season,
+                     penalty_score, penalty_reason,
+                     short_term_score, stf_capital, stf_volume, stf_overbought, stf_momentum,
+                     trend_score, structure_score, momentum_score, mf_score, pos_score,
+                     safety_gate, gate_triggered, signal_label)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     track=VALUES(track), composite_score=VALUES(composite_score),
                     calibrated_score=VALUES(calibrated_score),
@@ -895,13 +1363,30 @@ def daily_pipeline(mode: str = 'watch_pool'):
                     signal_confidence=VALUES(signal_confidence),
                     autumn_tiger=VALUES(autumn_tiger),
                     tiger_confidence=VALUES(tiger_confidence),
-                    hengjiyuan_level=VALUES(hengjiyuan_level)
+                    hengjiyuan_level=VALUES(hengjiyuan_level),
+                    season=VALUES(season),
+                    penalty_score=VALUES(penalty_score),
+                    penalty_reason=VALUES(penalty_reason),
+                    short_term_score=VALUES(short_term_score),
+                    stf_capital=VALUES(stf_capital), stf_volume=VALUES(stf_volume),
+                    stf_overbought=VALUES(stf_overbought), stf_momentum=VALUES(stf_momentum),
+                    trend_score=VALUES(trend_score), structure_score=VALUES(structure_score),
+                    momentum_score=VALUES(momentum_score), mf_score=VALUES(mf_score),
+                    pos_score=VALUES(pos_score),
+                    safety_gate=VALUES(safety_gate),
+                    gate_triggered=VALUES(gate_triggered),
+                    signal_label=VALUES(signal_label)
             """, (code, ctx.trade_date, r['track'],
                   r['score'], r['calibrated_score'],
                   'momentum' if r['track'] == 'momentum' else 'reversion',
-                  op_mode, bs, reason, sig_conf,
+                  _dir, op_mode, bs, reason, sig_conf,
                   autumn, tiger_conf,
-                  ctx.raw.get('hengjiyuan_level', 'weak_heng')))
+                  ctx.raw.get('hengjiyuan_level', 'weak_heng'),
+                  ctx.season,
+                  p_score, p_reason,
+                  stf_score, stf_capital, stf_volume, stf_overbought, stf_momentum,
+                  t_score, s_score, m_score, mf, ps,
+                  _gate, int(_gated), _sig_label))
             saved += 1
             if (i+1) % 10 == 0:
                 conn.commit()

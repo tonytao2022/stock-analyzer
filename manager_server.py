@@ -1928,6 +1928,8 @@ def watch_pool_refresh():
 def watch_pool_snapshot():
     try:
         trade_date = request.args.get('date', '')
+        use_v14 = request.args.get('v14', '')  # '1' 则附加 V14 评分
+
         with db_cursor(commit=False) as cur:
             # JOIN stock_basic 获取行业信息
             if trade_date:
@@ -1954,6 +1956,26 @@ def watch_pool_snapshot():
             heng_row = cur.fetchone()
 
         result_list = serialize_rows(rows)
+
+        # ── V14 评分附加（在同一连接中跨表查询，daily_v14_score 也在 stock_db_v2）──
+        if use_v14 == '1' and rows:
+            try:
+                with db_cursor(commit=False) as cur:
+                    cur.execute(
+                        "SELECT ts_code, v14_score, p6_score AS v14_p6_score "
+                        "FROM daily_v14_score WHERE trade_date = (SELECT MAX(trade_date) FROM daily_v14_score)"
+                    )
+                    v14_rows = cur.fetchall()
+                v14_map = {r['ts_code']: r for r in v14_rows}
+                for item in result_list:
+                    v14_info = v14_map.get(item['ts_code'], {})
+                    item['v14_score'] = float(v14_info.get('v14_score', 0)) if v14_info.get('v14_score') else None
+                    item['v14_p6_score'] = float(v14_info.get('v14_p6_score', 0)) if v14_info.get('v14_p6_score') else None
+            except Exception as ve:
+                logger.warning(f"watch_pool_snapshot v14 join failed: {ve}")
+                for item in result_list:
+                    item['v14_score'] = None
+                    item['v14_p6_score'] = None
 
         if heng_row:
             heng_level = heng_row['hengjiyuan_level']

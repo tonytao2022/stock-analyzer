@@ -44,7 +44,7 @@ def main():
         SELECT DISTINCT ts_code, name FROM (
             SELECT ts_code, name FROM backtest_pool WHERE status='ACTIVE' AND market!='指数'
             UNION
-            SELECT ts_code, name FROM watch_pool WHERE is_active=1 AND user_id='{get_user_id()}'
+            SELECT ts_code, name FROM watch_pool WHERE is_active=1 
         ) AS pool ORDER BY ts_code
     """)
     stocks = cur.fetchall()

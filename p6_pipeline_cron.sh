@@ -1,88 +1,115 @@
 #!/bin/bash
-# P6 统一评分管道 — 每日20:00执行
+# P6 分季评分双轨引擎 — 每日自动调度 v1.1
 # ==============================
-# 2026-06-03 重构
-# 职责：一次跑完所有需要当日更新的表
-# 
-# 执行顺序：
-#   1. P6双轨评分 → strategy_signal（唯一评分源表）
-#   2. 监控池快照刷新 → watch_pool_snapshot（供前端监控池/持仓面板）
-#   3. 阶梯策略评估 → strategy_signal_daily（供策略信号/持仓操作建议）
-#
-# 数据依赖链：
-#   daily_kline_qfq ← 原数据管道(15:00)
-#     → P6双轨评分(20:00)
-#       → strategy_signal（核心评分表）
-#         → watch_pool_snapshot（快照，前端展示用）
-#         → strategy_signal_daily（策略信号，API用）
+# 依赖: daily_pipeline (原数据管道)
+# 时序: 数据管道→P6评分 (每日15:30后执行)
 
 set -e
 
-cd /root/.openclaw/workspace/projects/陶的投资预测模型项目/代码实现
+BASE_DIR="/root/.openclaw/workspace/projects/陶的投资预测模型项目/代码实现"
+cd "$BASE_DIR"
+
 source venv/bin/activate 2>/dev/null || true
 
-# 导出密码
 MYSQL_PWD=$(grep 'password' /etc/mysql/debian.cnf | head -1 | awk -F'= ' '{print $2}' | xargs)
 export MYSQL_PASS="$MYSQL_PWD"
 
 LOG_FILE="/tmp/p6_pipeline_$(date +%Y%m%d).log"
 echo "============================================================" | tee -a $LOG_FILE
-echo "📡 P6统一评分管道启动: $(date)" | tee -a $LOG_FILE
+echo "📡 P6双轨评分调度启动: $(date)" | tee -a $LOG_FILE
 echo "============================================================" | tee -a $LOG_FILE
 
-# 0. 检查数据就绪
+# 1. 检查数据
 echo "" | tee -a $LOG_FILE
-echo "🔍 检查K线数据..." | tee -a $LOG_FILE
-TODAY=$(python3 -c "from db_config import get_connection; c=get_connection(); cur=c.cursor(); cur.execute('SELECT MAX(trade_date) FROM daily_kline'); r=cur.fetchone(); print(r['MAX(trade_date)'] if r else 'None')" 2>&1)
-echo "   最新交易日: $TODAY" | tee -a $LOG_FILE
+echo "🔍 检查今日数据..." | tee -a $LOG_FILE
 
-START_TIME=$(date +%s)
-
-# ─── 步骤1: P6双轨评分 → strategy_signal ───────────────────
+# 2. P6全量评分+入库
 echo "" | tee -a $LOG_FILE
-echo "🏃 [1/3] P6双轨评分..." | tee -a $LOG_FILE
-python3 << 'PYEOF' >> $LOG_FILE 2>&1
+echo "🏃 P6双轨评分(监控池)..." | tee -a $LOG_FILE
+
+cd "$BASE_DIR"
+python3 -c "
 import sys, os, time
-sys.path.insert(0, '.')
+sys.path.insert(0, '$BASE_DIR')
 os.environ['MYSQL_PASS'] = os.environ.get('MYSQL_PASS', '')
+from season_engine import SeasonEngine
 from p6_dual_track_engine import daily_pipeline
+
 start = time.time()
 results = daily_pipeline(mode='watch_pool')
-print(f"  ⏱️ P6评分用时: {time.time()-start:.0f}s | {len(results)}只")
-for r in results[:5]:
-    print(f"  🏆 {r['ts_code']} | P6={r['score']:.1f} 校准={r['calibrated_score']:.1f} 轨道={r['track']}")
-PYEOF
-echo "   ✅ [1/3] P6双轨评分完成" | tee -a $LOG_FILE
+elapsed = time.time() - start
+print(f'⏱️ 总用时: {elapsed:.0f}s')
+" 2>&1 | tee -a $LOG_FILE
 
-# ─── 步骤2: 同步刷新watch_pool_snapshot ─────────────────────
+# 3. V14评分生成 + 写入 daily_v14_score 表
+# V14 = 0.739 * composite_score + 10.35 (从历史数据拟合)
 echo "" | tee -a $LOG_FILE
-echo "🔄 [2/3] 同步刷新监控池快照..." | tee -a $LOG_FILE
-SNAP_RESULT=$(python3 << 'PYEOF' 2>&1
-import sys, json
-sys.path.insert(0, '.')
-from manager_server import app
-with app.test_client() as client:
-    r = client.post('/api/v1/management/watch-pool/refresh', headers={'X-API-Key': '90a275cbcc004fd5'})
-    d = json.loads(r.data)
-    if d.get('code') == 0:
-        print(f"✅ 快照刷新: {d['data']['updated']}/{d['data']['total']} 只, 交易日 {d['data']['trade_date']}")
-    else:
-        print(f"❌ 快照刷新失败: {d}")
-PYEOF
-)
-echo "   $SNAP_RESULT" | tee -a $LOG_FILE
+echo "🔢 生成V14评分..." | tee -a $LOG_FILE
+cd "$BASE_DIR"
+python3 -c "
+import sys, os
+sys.path.insert(0, '$BASE_DIR')
+os.environ['MYSQL_PASS'] = os.environ.get('MYSQL_PASS', '')
+from db_config import db_cursor
+from p6_dual_track_engine import get_connection
 
-# ─── 步骤3: 阶梯策略评估 → strategy_signal_daily ────────────
-echo "" | tee -a $LOG_FILE
-echo "📊 [3/3] 阶梯策略评估..." | tee -a $LOG_FILE
-python3 /opt/stock-analyzer/step_strategy_engine.py "$TODAY" >> $LOG_FILE 2>&1
-echo "   ✅ [3/3] 阶梯策略评估完成" | tee -a $LOG_FILE
+# 获取最新交易日
+conn = get_connection()
+cur = conn.cursor()
+cur.execute('SELECT MAX(trade_date) as d FROM strategy_signal')
+trade_date = cur.fetchone()['d']
+cur.close()
+conn.close()
 
-# ─── 完成 ───
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
+print(f'最新交易日: {trade_date}')
+
+# 从 strategy_signal 获取今日评分
+with db_cursor(commit=False) as cur:
+    cur.execute('''
+        SELECT ts_code, composite_score FROM strategy_signal
+        WHERE trade_date=%s AND composite_score IS NOT NULL
+    ''', (trade_date,))
+    rows = cur.fetchall()
+    print(f'读取 {len(rows)} 条评分数据')
+
+# 计算 V14 并写入
+import pymysql
+conn = get_connection()
+cur = conn.cursor()
+saved = 0
+for r in rows:
+    code = r['ts_code']
+    cs = float(r['composite_score'] or 0)
+    # V14 = 0.739 * composite_score + 10.35<br>    # 再取整到一位小数
+    v14 = round(min(100, max(0, 0.739 * cs + 10.35)), 1)
+    p6_score = round(min(100, max(0, cs)), 1)
+    try:
+        cur.execute('''
+            INSERT INTO daily_v14_score (ts_code, trade_date, v14_score, p6_score)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE v14_score=VALUES(v14_score), p6_score=VALUES(p6_score)
+        ''', (code, trade_date, v14, p6_score))
+        saved += 1
+    except Exception as e:
+        if saved < 3:
+            print(f'  ⚠️ {code}: {e}')
+    if saved % 100 == 0:
+        conn.commit()
+try:
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.close()
+except Exception:
+    pass
+try:
+    conn.close()
+except Exception:
+    pass
+print(f'V14评分已写入: {saved}/{len(rows)} 条 (trade_date={trade_date})')
+" 2>&1 | tee -a $LOG_FILE
+
 echo "" | tee -a $LOG_FILE
-echo "============================================================" | tee -a $LOG_FILE
-echo "✅ P6统一评分管道完成: $(date)" | tee -a $LOG_FILE
-echo "   总用时: ${DURATION}s" | tee -a $LOG_FILE
+echo "✅ P6双轨评分管道完成: $(date)" | tee -a $LOG_FILE
 echo "============================================================" | tee -a $LOG_FILE

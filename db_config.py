@@ -89,7 +89,21 @@ def db_cursor(commit=True):
 
 
 def get_tushare_token():
-    return os.environ.get('TUSHARE_TOKEN', '')
+    """获取Tushare Token：优先从DB system_config表读取，环境变量作为fallback"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor=pymysql.cursors.DictCursor)
+        cursor.execute("SELECT config_value FROM system_config WHERE config_key='tushare_token'")
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row and row['config_value']:
+            return row['config_value']
+    except Exception:
+        pass
+    # fallback: 环境变量
+    token = os.environ.get('TUSHARE_TOKEN', '')
+    return token
 
 
 # ─── 统一响应工具 ────────────────────────────────────────────
